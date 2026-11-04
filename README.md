@@ -188,6 +188,10 @@ Side-by-side:
 - **Seeing the official app's threads.** Add the official app's server as an environment in your
   app: through T3 Connect (sign in to both with the same account) or over your LAN (turn on network
   access in the official app and pair).
+- **First launch imports old v1 storage.** If you still have the pre-2.0 profile
+  (`~/Library/Application Support/t3code`), upstream copies its browser storage into the new app's
+  profile once (read-only, the old profile isn't changed). Saved environments from back then can
+  show up, e.g. this Mac's official server, which is a quick way to see its threads.
 - **`t3code://` links** (and browser sign-in callbacks) go to one app only: the one that started
   last, since each app makes itself the handler when it starts. Your app keeps the `t3code` scheme
   because T3 Connect's sign-in uses it as the app's origin, and another scheme may not be accepted.
