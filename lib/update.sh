@@ -304,7 +304,7 @@ failures_are_preexisting() {
 resolver_prompt() {
   local group gate_cmds=""
   for group in "${FORK_TEST_GROUPS[@]+"${FORK_TEST_GROUPS[@]}"}"; do
-    gate_cmds+="   - \`vp test run $(git ls-files | grep -E "$group" | tr '\n' ' ')\`"$'\n'
+    gate_cmds+="   - \`vp test run $(group_files "$group" | sed 's/ $//')\`"$'\n'
   done
   [ "$RUN_CHECK_CHANGED" = 1 ] && gate_cmds+="   - \`vp run check:changed $UP_REF\`"$'\n'
   cat <<EOF
@@ -322,8 +322,10 @@ Your job:
 3. Run \`vp i\`, then the same checks the update script runs after you exit:
 ${gate_cmds}   Fix what the rebase broke, amending the fork commit that introduced the code
    (\`git commit --amend\` only while that commit is the one being replayed) or with a follow-up
-   \`fix: ...\` commit after the rebase. A check:changed test failure that also fails on plain
-   $UP_REF is pre-existing; leave it.
+   \`fix: ...\` commit after the rebase. Only fix failures in code the fork or your resolution
+   touched. After you exit, the script re-runs every check and compares each failing test against
+   a pristine $UP_REF checkout, so a failure that upstream already has is fine: don't
+   investigate it, don't edit upstream code to work around it, just mention it.
 
 Hard rules:
 - Never renumber, rename or edit database migration ids/names in
