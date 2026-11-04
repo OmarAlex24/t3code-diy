@@ -3,7 +3,7 @@
 
 rollback_usage() {
   cat <<EOF
-Usage: t3code-diy rollback [<backup-dir>] [--yes] [--no-open]
+Usage: t3code-diy rollback [<backup-dir>] [--yes] [--no-open]   (replace mode only)
 
 Restores the app and data saved by the last switch (or the backup you pass). Your current data
 is moved aside, not deleted. Run it from Terminal.app, not from inside T3 Code.
@@ -25,6 +25,7 @@ cmd_rollback() {
     esac
   done
   load_config
+  is_side_by_side && die "rollback is for replace mode; in side-by-side mode use: t3code-diy uninstall-app (see README, Modes)"
 
   backup="${backup:-$(cat "$STATE/last-switch-backup" 2>/dev/null || true)}"
   [ -n "$backup" ] && [ -f "$backup/manifest" ] || die "no switch backup found (pass the backup dir)"

@@ -18,8 +18,19 @@ PUSH=1
 CLAUDE_MODEL="opus"
 CLAUDE_TIMEOUT_MIN=90
 TOOL_PATH=""
+# side-by-side: your build is its own app next to the official one (SIDE_* below).
+# replace: your build takes over the official app's name, bundle id and data (switch/rollback).
+MODE="side-by-side"
+# The name upstream's build produces. In replace mode it is also the installed app's name.
 APP_NAME="T3 Code (Nightly)"
 APPS_DIR="/Applications"
+OFFICIAL_BUNDLE_ID="com.t3tools.t3code"
+SIDE_APP_NAME="T3 Code Custom"
+SIDE_BUNDLE_ID="com.t3tools.t3code.custom"
+SIDE_USER_DATA_NAME="t3code-custom"
+SIDE_T3_HOME="$HOME/.t3-custom"
+# The official app scans up from 3773, so a fixed port above that keeps the two apart.
+SIDE_PORT=3873
 USERDATA_DIR="$HOME/.t3/userdata"
 ELECTRON_DATA_DIRS=("$HOME/Library/Application Support/t3code-v2" "$HOME/Library/Application Support/t3code")
 UPDATER_CACHE_DIR_NAME="t3code-diy-updater"
@@ -34,11 +45,19 @@ load_config() {
     echo "No config at $DIY_CONFIG. Run: t3code-diy install" >&2
     exit 1
   fi
-  # shellcheck disable=SC1090
-  source "$DIY_CONFIG"
+  source_config
   derive_paths
   [ -n "$TOOL_PATH" ] && export PATH="$TOOL_PATH"
 }
+
+# Configs written before MODE existed were replace-mode installs; keep them that way.
+source_config() {
+  grep -q '^MODE=' "$DIY_CONFIG" || MODE="replace"
+  # shellcheck disable=SC1090
+  source "$DIY_CONFIG"
+}
+
+is_side_by_side() { [ "$MODE" = "side-by-side" ]; }
 
 derive_paths() {
   REPO="$DIY_HOME/repo"
@@ -53,7 +72,16 @@ derive_paths() {
   ENTITLEMENTS="$SIGNING/entitlements.plist"
   KIT="$DIY_HOME/kit"
   FEED_URL="http://127.0.0.1:$FEED_PORT/"
-  INSTALLED_APP="$APPS_DIR/$APP_NAME.app"
+  if is_side_by_side; then
+    INSTALLED_NAME="$SIDE_APP_NAME"
+    APP_BUNDLE_ID="$SIDE_BUNDLE_ID"
+    INSTALLED_DB="$SIDE_T3_HOME/userdata/statev2.sqlite"
+  else
+    INSTALLED_NAME="$APP_NAME"
+    APP_BUNDLE_ID="$OFFICIAL_BUNDLE_ID"
+    INSTALLED_DB="$USERDATA_DIR/statev2.sqlite"
+  fi
+  INSTALLED_APP="$APPS_DIR/$INSTALLED_NAME.app"
   FEED_LABEL="$LABEL_PREFIX.feed"
   UPDATE_LABEL="$LABEL_PREFIX.update"
   AGENTS_DIR="${DIY_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
@@ -99,8 +127,8 @@ designated_requirement() {
 }
 
 expected_requirement() {
-  printf 'identifier "com.t3tools.t3code" and certificate root = H"%s"' \
-    "$(signing_identity | tr 'A-F' 'a-f')"
+  printf 'identifier "%s" and certificate root = H"%s"' \
+    "$APP_BUNDLE_ID" "$(signing_identity | tr 'A-F' 'a-f')"
 }
 
 is_fork_build() {
@@ -177,7 +205,7 @@ regex_escape() { printf %s "$1" | sed 's/[][().*^$+?{}|\\]/\\&/g'; }
 # Blocks until T3 Code and anything holding its database are gone. With --yes it fails instead
 # of waiting, because nobody is there to press Enter.
 wait_for_app_quit() {
-  local assume_yes="$1" db="$USERDATA_DIR/statev2.sqlite" exe_re
+  local assume_yes="$1" db="$INSTALLED_DB" exe_re
   exe_re="$(regex_escape "$INSTALLED_APP/Contents/MacOS/$APP_NAME")"
   while lsof -t "$db" >/dev/null 2>&1 || pgrep -qfx "$exe_re"; do
     echo "Something still has T3 Code or $db open:"
@@ -186,6 +214,11 @@ wait_for_app_quit() {
     [ "$assume_yes" = 1 ] && die "quit it and run this again"
     read -r -p "Quit it and press Enter to check again (Ctrl+C aborts)... "
   done
+}
+
+# PIDs of anything running from inside the installed app bundle (read-only check, kills nothing).
+installed_app_pids() {
+  pgrep -f "^$(regex_escape "$INSTALLED_APP")/"
 }
 
 # True while an update run holds the lock.

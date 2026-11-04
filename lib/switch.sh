@@ -3,7 +3,7 @@
 
 switch_usage() {
   cat <<EOF
-Usage: t3code-diy switch [<version>] [--yes] [--no-open]
+Usage: t3code-diy switch [<version>] [--yes] [--no-open]   (replace mode only)
 
 Run it from Terminal.app, not from a terminal inside T3 Code: it asks you to quit T3 Code.
 Backs up your T3 Code data and the current app, then installs the build (newest by default).
@@ -25,6 +25,7 @@ cmd_switch() {
     esac
   done
   load_config
+  is_side_by_side && die "switch is for replace mode; in side-by-side mode use: t3code-diy install-app (see README, Modes)"
 
   version="${version:-$(latest_build)}"
   [ -n "$version" ] || die "no build in $BUILDS yet. Run: t3code-diy update"

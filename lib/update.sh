@@ -40,17 +40,19 @@ cmd_update() {
     exit 0
   fi
   CLAUDE_PID=""
+  PATCHED=0
   trap update_cleanup EXIT
 
   export GIT_EDITOR=true GIT_SEQUENCE_EDITOR=true GIT_TERMINAL_PROMPT=0
   cd "$REPO" || fail "repo missing: $REPO"
 
-  log "== t3code-diy update start (force=$FORCE no_push=$NO_PUSH reuse_dist=$REUSE_DIST)"
+  log "== t3code-diy update start (mode=$MODE force=$FORCE no_push=$NO_PUSH reuse_dist=$REUSE_DIST)"
   log "fork: $FORK_URL ($FORK_BRANCH)  upstream: $UPSTREAM_URL ($UPSTREAM_BRANCH)"
   log "tools: node $(node -v 2>&1) ($(type -P node)), $(vp --version 2>&1 | head -1), $(cargo --version 2>&1), claude $(claude --version 2>&1 | head -1)"
 
   # ------------------------------------------------------------ git: fetch & rebase
   rebase_in_progress && fail "a rebase is already in progress in $REPO; resolve or abort it by hand"
+  revert_leftover_side_patch
   [ -z "$(git status --porcelain --untracked-files=no)" ] || fail "uncommitted changes in $REPO; commit or discard them by hand"
 
   git fetch --prune upstream "$UPSTREAM_BRANCH" || fail "git fetch upstream failed"
@@ -150,12 +152,17 @@ cmd_update() {
   log "building version $version (installed: ${installed:-none}, last build: ${last_version:-none})"
 
   # ------------------------------------------------------------ build
+  if is_side_by_side; then
+    case "$SIDE_T3_HOME" in /*) ;; *) fail "SIDE_T3_HOME must be an absolute path (got '$SIDE_T3_HOME')" ;; esac
+    apply_side_patch
+  fi
   local work="$BUILDS/.work" build_args built_app apps
   rm -rf "$work"
   build_args=(--platform mac --target dir --arch arm64 --build-version "$version" --output-dir "$work")
   [ "$REUSE_DIST" = 1 ] && build_args+=(--skip-build)
   # No signing identity and no publish config: the app is re-signed and its feed written below.
   CSC_IDENTITY_AUTO_DISCOVERY=false node scripts/build-desktop-artifact.ts "${build_args[@]}" || fail "desktop build failed"
+  revert_side_patch
   apps=()
   while IFS= read -r built_app; do apps+=("$built_app"); done < <(find "$work/mac-arm64" -maxdepth 1 -name '*.app' 2>/dev/null)
   [ "${#apps[@]}" = 1 ] || fail "expected one .app in $work/mac-arm64, found ${#apps[@]}"
@@ -163,6 +170,15 @@ cmd_update() {
   [ "$(basename "$built_app")" = "$APP_NAME.app" ] \
     || fail "the build produced '$(basename "$built_app")' but APP_NAME is '$APP_NAME'; fix APP_NAME in $DIY_CONFIG"
   [ "$(plist_version "$built_app")" = "$version" ] || fail "built app version is $(plist_version "$built_app"), expected $version"
+
+  if is_side_by_side; then
+    # Without the override the app would use the official profile, lose the single-instance lock
+    # to the official app and quit. Never publish that.
+    grep -qa T3CODE_DESKTOP_USER_DATA_NAME "$built_app/Contents/Resources/app.asar" \
+      || fail "the built app does not read T3CODE_DESKTOP_USER_DATA_NAME (stale --reuse-dist output?); not publishing it"
+    built_app="$(make_side_by_side "$built_app")" || fail "turning the build into $SIDE_APP_NAME failed"
+    log "side-by-side app: $SIDE_APP_NAME ($SIDE_BUNDLE_ID), home $SIDE_T3_HOME, userData $SIDE_USER_DATA_NAME, port $SIDE_PORT"
+  fi
 
   # The managed policy's feedUrl only accepts https, so the local feed is baked into the bundle.
   cat >"$built_app/Contents/Resources/app-update.yml" <<EOF
@@ -183,12 +199,13 @@ EOF
   rm -rf "$dest"; mkdir -p "$dest"
   mv "$built_app" "$dest/"
   echo "$HEAD_SHA" >"$dest/commit"
+  echo "$MODE" >"$dest/mode"
   echo "$UP" >"$dest/upstream-commit"
   rm -rf "$work"
 
   # ------------------------------------------------------------ publish
   local zip_name="T3-Code-$version-arm64.zip"
-  (cd "$dest" && ditto -c -k --keepParent "$APP_NAME.app" "$FEED/.$zip_name.part") || fail "zip failed"
+  (cd "$dest" && ditto -c -k --keepParent "$INSTALLED_NAME.app" "$FEED/.$zip_name.part") || fail "zip failed"
   mv -f "$FEED/.$zip_name.part" "$FEED/$zip_name"
   # The app reads nightly-mac.yml on the nightly channel; latest-mac.yml covers the stable one.
   write_feed_yml "$FEED/$zip_name" "$version" "$FEED/nightly-mac.yml"
@@ -209,13 +226,92 @@ EOF
   done
 
   log "== done: $version"
-  notify "build ready" "$version is in the local feed. Use Check for updates in the app." && log "notification sent"
+  if [ -d "$INSTALLED_APP" ]; then
+    notify "build ready" "$version is in the local feed. Use Check for updates in $INSTALLED_NAME." && log "notification sent"
+  else
+    notify "build ready" "$version is ready. Install it with: t3code-diy $(is_side_by_side && echo install-app || echo switch)" && log "notification sent"
+  fi
   exit 0
 }
 
 update_cleanup() {
   [ -n "${CLAUDE_PID:-}" ] && kill -- "-$CLAUDE_PID" 2>/dev/null
+  revert_side_patch
   rm -f "$LOCK"
+}
+
+# ---------------------------------------------------------------- side-by-side
+# Upstream hardcodes the Electron profile dir (t3code-v2), so two apps would share one profile
+# and one single-instance lock. This small patch lets T3CODE_DESKTOP_USER_DATA_NAME pick another.
+# It is applied only for the build, after the tests and the push, and reverted right after.
+SIDE_PATCH_FILE="apps/desktop/src/app/DesktopUserData.ts"
+side_patch() { echo "$KIT_SRC/templates/patches/userdata-name.patch"; }
+
+apply_side_patch() {
+  if grep -q T3CODE_DESKTOP_USER_DATA_NAME "$REPO/$SIDE_PATCH_FILE"; then
+    log "$SIDE_PATCH_FILE already reads T3CODE_DESKTOP_USER_DATA_NAME; no patch needed"
+    return 0
+  fi
+  git -C "$REPO" apply --check "$(side_patch)" \
+    || fail "the side-by-side patch no longer applies to $SIDE_PATCH_FILE (upstream changed it). Nothing was built; the installed version is unchanged. Update $(side_patch)"
+  git -C "$REPO" apply "$(side_patch)" || fail "applying the side-by-side patch failed"
+  PATCHED=1
+  [ "$(git -C "$REPO" diff --numstat)" = "$(printf '3\t0\t%s' "$SIDE_PATCH_FILE")" ] \
+    || fail "the side-by-side patch did not apply exactly: $(git -C "$REPO" diff --numstat | tr '\n' ' ')"
+  log "applied the side-by-side patch to $SIDE_PATCH_FILE"
+}
+
+revert_side_patch() {
+  [ "${PATCHED:-0}" = 1 ] || return 0
+  if git -C "$REPO" apply -R "$(side_patch)"; then
+    PATCHED=0
+    log "reverted the side-by-side patch"
+  else
+    log "could not revert the side-by-side patch; the next run retries"
+  fi
+}
+
+# A run killed mid-build leaves the patch in the tree; take it out so the tree is clean again.
+revert_leftover_side_patch() {
+  [ "$(git diff --numstat)" = "$(printf '3\t0\t%s' "$SIDE_PATCH_FILE")" ] || return 0
+  git apply -R --check "$(side_patch)" 2>/dev/null || return 0
+  git apply -R "$(side_patch)" && log "reverted the side-by-side patch a previous run left behind"
+}
+
+# Renames the built app the way electron-builder would for another productName (main executable,
+# helper apps, their Info.plists), gives it its own bundle id, and bakes its home, profile and
+# port into LSEnvironment so Finder, the Dock and the updater's relaunch all start it the same way.
+# Prints the new path. Must run before signing.
+make_side_by_side() {
+  local app="$1" from="$APP_NAME" to="$SIDE_APP_NAME" c h suffix nh hp id
+  c="$app/Contents"
+  [ -f "$c/MacOS/$from" ] || { log "no executable $c/MacOS/$from" >&2; return 1; }
+  mv "$c/MacOS/$from" "$c/MacOS/$to" || return 1
+  for h in "$c/Frameworks/$from Helper"*.app; do
+    [ -d "$h" ] || continue
+    suffix="$(basename "$h" .app)"; suffix="${suffix#"$from Helper"}"
+    nh="$c/Frameworks/$to Helper$suffix.app"
+    mv "$h" "$nh" || return 1
+    mv "$nh/Contents/MacOS/$from Helper$suffix" "$nh/Contents/MacOS/$to Helper$suffix" || return 1
+    hp="$nh/Contents/Info.plist"
+    id="$(plutil -extract CFBundleIdentifier raw "$hp")" || return 1
+    plutil -replace CFBundleExecutable -string "$to Helper$suffix" "$hp" || return 1
+    plutil -replace CFBundleDisplayName -string "$to Helper$suffix" "$hp" || return 1
+    plutil -replace CFBundleIdentifier -string "$SIDE_BUNDLE_ID${id#"$OFFICIAL_BUNDLE_ID"}" "$hp" || return 1
+  done
+  [ -z "$(find "$c" -name "*$from*")" ] || { log "leftover '$from' paths: $(find "$c" -name "*$from*")" >&2; return 1; }
+  local p="$c/Info.plist" k
+  for k in CFBundleName CFBundleDisplayName CFBundleExecutable; do
+    plutil -replace "$k" -string "$to" "$p" || return 1
+  done
+  plutil -replace CFBundleIdentifier -string "$SIDE_BUNDLE_ID" "$p" || return 1
+  plutil -extract LSEnvironment raw "$p" >/dev/null 2>&1 || plutil -insert LSEnvironment -dictionary "$p" || return 1
+  plutil -replace LSEnvironment.T3CODE_HOME -string "$SIDE_T3_HOME" "$p" || return 1
+  plutil -replace LSEnvironment.T3CODE_DESKTOP_USER_DATA_NAME -string "$SIDE_USER_DATA_NAME" "$p" || return 1
+  plutil -replace LSEnvironment.T3CODE_PORT -string "$SIDE_PORT" "$p" || return 1
+  plutil -lint -s "$p" "$c/Frameworks/$to Helper"*.app/Contents/Info.plist || return 1
+  mv "$app" "$(dirname "$app")/$to.app" || return 1
+  echo "$(dirname "$app")/$to.app"
 }
 
 fail() {

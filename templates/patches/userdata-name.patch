@@ -1,0 +1,12 @@
+--- a/apps/desktop/src/app/DesktopUserData.ts
++++ b/apps/desktop/src/app/DesktopUserData.ts
+@@ -39,6 +39,9 @@
+   }) {
+     const fs = yield* FileSystem.FileSystem;
+     const path = yield* Path.Path;
++    // A side-by-side build (another app next to this one) needs its own profile and instance lock.
++    const override = process.env.T3CODE_DESKTOP_USER_DATA_NAME?.trim();
++    if (override) return path.join(input.appDataDirectory, path.basename(override));
+     const names = input.isDevelopment
+       ? { current: "t3code-dev", legacy: "T3 Code (Dev)" }
+       : { current: "t3code-v2", legacy: "T3 Code (Alpha)" };

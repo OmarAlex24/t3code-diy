@@ -19,8 +19,19 @@ Asks for anything you don't pass. With --yes it asks nothing and uses defaults.
   --test-group REGEX      a group of your fork's tests (regex over git ls-files); repeatable
   --no-check-changed      skip upstream's "vp run check:changed" in the test gate
   --no-push               never push the rebased branch back to your fork
-  --app-name NAME         default: "$APP_NAME"
+  --mode MODE             side-by-side (default): your build is its own app next to the
+                          official one. replace: it takes over the official app (switch/rollback)
   --apps-dir DIR          default: $APPS_DIR
+
+Side-by-side mode (re-run install-app after changing these):
+  --side-name NAME        app name, default: "$SIDE_APP_NAME"
+  --side-bundle-id ID     default: $SIDE_BUNDLE_ID
+  --side-user-data NAME   Electron profile dir in ~/Library/Application Support, default: $SIDE_USER_DATA_NAME
+  --side-home DIR         its T3 home (projects, threads, settings), default: $SIDE_T3_HOME
+  --side-port N           its server port, default: $SIDE_PORT
+
+Replace mode:
+  --app-name NAME         default: "$APP_NAME"
   --userdata-dir DIR      default: $USERDATA_DIR
   --electron-data-dir DIR repeatable; default: the two t3code dirs in ~/Library/Application Support
   --tool-path PATH        PATH for the launchd job (default: built from where your tools live)
@@ -35,8 +46,7 @@ cmd_install() {
   local assume_yes=0 no_load=0 groups_set=0 edirs_set=0 tool_path_arg=""
   local new_groups=() new_edirs=()
   # Re-running install keeps the existing answers as defaults.
-  # shellcheck disable=SC1090
-  [ -f "$DIY_CONFIG" ] && source "$DIY_CONFIG"
+  [ -f "$DIY_CONFIG" ] && source_config
   while [ $# -gt 0 ]; do
     case "$1" in
       --fork-url) FORK_URL="$2"; shift ;;
@@ -52,6 +62,12 @@ cmd_install() {
       --test-group) new_groups+=("$2"); groups_set=1; shift ;;
       --no-check-changed) RUN_CHECK_CHANGED=0 ;;
       --no-push) PUSH=0 ;;
+      --mode) MODE="$2"; shift ;;
+      --side-name) SIDE_APP_NAME="$2"; shift ;;
+      --side-bundle-id) SIDE_BUNDLE_ID="$2"; shift ;;
+      --side-user-data) SIDE_USER_DATA_NAME="$2"; shift ;;
+      --side-home) SIDE_T3_HOME="$2"; shift ;;
+      --side-port) SIDE_PORT="$2"; shift ;;
       --app-name) APP_NAME="$2"; shift ;;
       --apps-dir) APPS_DIR="$2"; shift ;;
       --userdata-dir) USERDATA_DIR="$2"; shift ;;
@@ -95,6 +111,23 @@ cmd_install() {
   [[ "$SCHEDULE_HOUR" =~ ^[0-9]+$ && "$SCHEDULE_HOUR" -le 23 ]] || die "hour must be 0-23"
   [[ "$SCHEDULE_MINUTE" =~ ^[0-9]+$ && "$SCHEDULE_MINUTE" -le 59 ]] || die "minute must be 0-59"
   [[ "$LABEL_PREFIX" =~ ^[A-Za-z0-9.-]+$ ]] || die "label prefix may only use letters, digits, dots and dashes"
+  case "$MODE" in side-by-side | replace) ;; *) die "--mode must be side-by-side or replace" ;; esac
+  if is_side_by_side; then
+    SIDE_T3_HOME="${SIDE_T3_HOME/#\~/$HOME}"
+    [ -n "$SIDE_APP_NAME" ] && [[ "$SIDE_APP_NAME" != */* ]] || die "--side-name must be a plain name"
+    [ "$SIDE_APP_NAME" != "$APP_NAME" ] && [ "$SIDE_APP_NAME" != "T3 Code" ] && [ "$SIDE_APP_NAME" != "T3 Code (Beta)" ] \
+      || die "--side-name must differ from the official app names"
+    [[ "$SIDE_BUNDLE_ID" =~ ^[A-Za-z0-9.-]+$ ]] && [ "$SIDE_BUNDLE_ID" != "$OFFICIAL_BUNDLE_ID" ] \
+      || die "--side-bundle-id must be a reverse-DNS id other than $OFFICIAL_BUNDLE_ID"
+    [[ "$SIDE_USER_DATA_NAME" =~ ^[A-Za-z0-9._-]+$ ]] || die "--side-user-data must be a plain directory name"
+    case "$SIDE_USER_DATA_NAME" in t3code | t3code-v2 | t3code-dev) die "--side-user-data $SIDE_USER_DATA_NAME belongs to an official app" ;; esac
+    case "$SIDE_T3_HOME" in /*) ;; *) die "--side-home must be an absolute path" ;; esac
+    [ "${SIDE_T3_HOME%/}" != "$HOME/.t3" ] || die "--side-home must not be the official ~/.t3"
+    [[ "$SIDE_PORT" =~ ^[0-9]+$ ]] && [ "$SIDE_PORT" -gt 1024 ] && [ "$SIDE_PORT" -le 65535 ] \
+      || die "--side-port must be a port number above 1024"
+    [ "$SIDE_PORT" != "$FEED_PORT" ] || die "--side-port and --port must differ"
+    [ "$SIDE_PORT" != 3773 ] || die "--side-port 3773 is where the official app starts; pick another"
+  fi
 
   TOOL_PATH="${tool_path_arg:-$(build_tool_path)}"
   derive_paths
@@ -125,7 +158,12 @@ Done.
 - Command: $KIT/bin/t3code-diy (add $KIT/bin to your PATH if you like)
 - Daily update at $SCHEDULE_HOUR:$(printf %02d "$SCHEDULE_MINUTE")$([ "$RUN_AT_LOGIN" = 1 ] && echo " and at login")$([ "$no_load" = 0 ] && [ "$RUN_AT_LOGIN" = 1 ] && echo "; the first one is running now")
 - Logs: $LOGS (t3code-diy status shows the latest)
-- Once a build is in the feed, run "t3code-diy switch" from Terminal.app to install it.
+$(if is_side_by_side; then
+  echo "- Mode: side-by-side. Once a build is in the feed, run \"t3code-diy install-app\" to put"
+  echo "  \"$SIDE_APP_NAME\" in $APPS_DIR next to the official app."
+else
+  echo "- Mode: replace. Once a build is in the feed, run \"t3code-diy switch\" from Terminal.app."
+fi)
 EOF
 }
 
@@ -221,7 +259,14 @@ write_config() {
     for g in "${FORK_TEST_GROUPS[@]+"${FORK_TEST_GROUPS[@]}"}"; do printf '\n  %s' "$(sq "$g")"; done
     printf '\n)\n'
     echo "RUN_CHECK_CHANGED=$(sq "$RUN_CHECK_CHANGED")"
-    echo "# Where switch/rollback look. The build's app name follows from the nightly version."
+    echo "# side-by-side: your build is its own app next to the official one (install-app)."
+    echo "# replace: it takes over the official app (switch/rollback). See README, Modes."
+    echo "MODE=$(sq "$MODE")"
+    echo "# Side-by-side app. Baked into each build; after changing them run update --force,"
+    echo "# then quit the app and run install-app."
+    for v in SIDE_APP_NAME SIDE_BUNDLE_ID SIDE_USER_DATA_NAME SIDE_T3_HOME SIDE_PORT; do echo "$v=$(sq "${!v}")"; done
+    echo "# The build's app name follows from the nightly version. Replace mode installs it under"
+    echo "# that name and backs up USERDATA_DIR and ELECTRON_DATA_DIRS on switch."
     for v in APP_NAME APPS_DIR USERDATA_DIR; do echo "$v=$(sq "${!v}")"; done
     printf 'ELECTRON_DATA_DIRS=('
     for g in "${ELECTRON_DATA_DIRS[@]}"; do printf '\n  %s' "$(sq "$g")"; done
