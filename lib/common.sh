@@ -114,6 +114,8 @@ unlock_signing_keychain() {
 }
 
 plist_version() {
+  # PlistBuddy prints "File Doesn't Exist" on stdout, so check first.
+  [ -f "$1/Contents/Info.plist" ] || return 1
   /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$1/Contents/Info.plist" 2>/dev/null
 }
 
