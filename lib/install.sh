@@ -308,7 +308,11 @@ EOF
   while IFS= read -r k; do before+=("$k"); done < <(security list-keychains -d user | sed -E 's/^[[:space:]]*"(.*)"$/\1/')
   security create-keychain -p "$(cat "$SIGNING/keychain.pass")" "$KEYCHAIN" || return 1
   # create-keychain adds itself to the search list; put the list back as it was.
-  security list-keychains -d user -s "${before[@]}"
+  if [ "${#before[@]}" -gt 0 ]; then
+    security list-keychains -d user -s "${before[@]}"
+  else
+    echo "warning: your keychain search list was empty; check it with: security list-keychains -d user"
+  fi
   security set-keychain-settings "$KEYCHAIN"
   chmod 600 "$KEYCHAIN"
   unlock_signing_keychain || return 1
