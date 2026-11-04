@@ -47,6 +47,7 @@ cmd_update() {
 
   log "== t3code-diy update start (force=$FORCE no_push=$NO_PUSH reuse_dist=$REUSE_DIST)"
   log "fork: $FORK_URL ($FORK_BRANCH)  upstream: $UPSTREAM_URL ($UPSTREAM_BRANCH)"
+  log "tools: node $(node -v 2>&1) ($(type -P node)), $(vp --version 2>&1 | head -1), $(cargo --version 2>&1), claude $(claude --version 2>&1 | head -1)"
 
   # ------------------------------------------------------------ git: fetch & rebase
   rebase_in_progress && fail "a rebase is already in progress in $REPO; resolve or abort it by hand"

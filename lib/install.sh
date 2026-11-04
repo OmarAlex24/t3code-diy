@@ -199,33 +199,34 @@ build_tool_path() {
   printf '%s\n' "${dirs[@]}" | awk '!seen[$0]++' | paste -sd: -
 }
 
+# Single-quotes a value for the config file (readable, unlike printf %q).
+sq() { local q="'\\''"; printf "'%s'" "${1//\'/$q}"; }
+
 write_config() {
-  local tmp="$DIY_CONFIG.tmp" g
+  local tmp="$DIY_CONFIG.tmp" g v
   {
     echo "# t3code-diy config. Written by 'install'; edit freely, it is sourced by bash."
-    printf 'FORK_URL=%q\n' "$FORK_URL"
-    printf 'FORK_BRANCH=%q\n' "$FORK_BRANCH"
-    printf 'UPSTREAM_URL=%q\n' "$UPSTREAM_URL"
-    printf 'UPSTREAM_BRANCH=%q\n' "$UPSTREAM_BRANCH"
-    printf 'FEED_PORT=%q\n' "$FEED_PORT"
-    printf 'LABEL_PREFIX=%q\n' "$LABEL_PREFIX"
-    printf 'SCHEDULE_HOUR=%q\nSCHEDULE_MINUTE=%q\nRUN_AT_LOGIN=%q\n' "$SCHEDULE_HOUR" "$SCHEDULE_MINUTE" "$RUN_AT_LOGIN"
+    for v in FORK_URL FORK_BRANCH UPSTREAM_URL UPSTREAM_BRANCH FEED_PORT LABEL_PREFIX \
+      SCHEDULE_HOUR SCHEDULE_MINUTE RUN_AT_LOGIN; do
+      echo "$v=$(sq "${!v}")"
+    done
     echo "# 1 = push the rebased branch back to your fork (force-with-lease) after tests pass"
-    printf 'PUSH=%q\n' "$PUSH"
-    printf 'CLAUDE_MODEL=%q\nCLAUDE_TIMEOUT_MIN=%q\n' "$CLAUDE_MODEL" "$CLAUDE_TIMEOUT_MIN"
+    echo "PUSH=$(sq "$PUSH")"
+    echo "CLAUDE_MODEL=$(sq "$CLAUDE_MODEL")"
+    echo "CLAUDE_TIMEOUT_MIN=$(sq "$CLAUDE_TIMEOUT_MIN")"
     echo "# Your fork's tests: each entry is a regex over 'git ls-files', run as one 'vp test run'."
     printf 'FORK_TEST_GROUPS=('
-    for g in "${FORK_TEST_GROUPS[@]+"${FORK_TEST_GROUPS[@]}"}"; do printf '\n  %q' "$g"; done
+    for g in "${FORK_TEST_GROUPS[@]+"${FORK_TEST_GROUPS[@]}"}"; do printf '\n  %s' "$(sq "$g")"; done
     printf '\n)\n'
-    printf 'RUN_CHECK_CHANGED=%q\n' "$RUN_CHECK_CHANGED"
+    echo "RUN_CHECK_CHANGED=$(sq "$RUN_CHECK_CHANGED")"
     echo "# Where switch/rollback look. The build's app name follows from the nightly version."
-    printf 'APP_NAME=%q\nAPPS_DIR=%q\nUSERDATA_DIR=%q\n' "$APP_NAME" "$APPS_DIR" "$USERDATA_DIR"
+    for v in APP_NAME APPS_DIR USERDATA_DIR; do echo "$v=$(sq "${!v}")"; done
     printf 'ELECTRON_DATA_DIRS=('
-    for g in "${ELECTRON_DATA_DIRS[@]}"; do printf '\n  %q' "$g"; done
+    for g in "${ELECTRON_DATA_DIRS[@]}"; do printf '\n  %s' "$(sq "$g")"; done
     printf '\n)\n'
-    printf 'UPDATER_CACHE_DIR_NAME=%q\nKEEP_BUILDS=%q\nSEQ_START=%q\n' "$UPDATER_CACHE_DIR_NAME" "$KEEP_BUILDS" "$SEQ_START"
+    for v in UPDATER_CACHE_DIR_NAME KEEP_BUILDS SEQ_START; do echo "$v=$(sq "${!v}")"; done
     echo "# PATH for the launchd job (it does not read your shell profile)."
-    printf 'TOOL_PATH=%q\n' "$TOOL_PATH"
+    echo "TOOL_PATH=$(sq "$TOOL_PATH")"
   } >"$tmp"
   mv -f "$tmp" "$DIY_CONFIG"
 }
@@ -306,6 +307,7 @@ EOF
   # create-keychain adds itself to the search list; put the list back as it was.
   security list-keychains -d user -s "${before[@]}"
   security set-keychain-settings "$KEYCHAIN"
+  chmod 600 "$KEYCHAIN"
   unlock_signing_keychain || return 1
   security import "$SIGNING/identity.p12" -k "$KEYCHAIN" -P "$(cat "$SIGNING/p12.pass")" \
     -T /usr/bin/codesign >/dev/null || return 1
@@ -400,7 +402,7 @@ load_agents() {
     echo "loaded $label"
   done
   local i
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  for i in $(seq 1 40); do
     curl -fsS -o /dev/null "$FEED_URL" 2>/dev/null && { echo "feed answering on $FEED_URL"; return 0; }
     sleep 0.5
   done
