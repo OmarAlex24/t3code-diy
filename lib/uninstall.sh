@@ -27,10 +27,7 @@ cmd_uninstall() {
   local uid label
   uid="$(id -u)"
 
-  local lock="$STATE/update.lock" pid
-  if pid="$(cat "$lock" 2>/dev/null)" && kill -0 "$pid" 2>/dev/null; then
-    die "an update is running (pid $pid); wait for it or stop it first"
-  fi
+  update_running && die "an update is running (pid $(cat "$STATE/update.lock")); wait for it to finish"
 
   if [ "$purge" = 1 ] && [ "$assume_yes" = 0 ]; then
     if [ -d "$BACKUPS" ] && [ -n "$(ls -A "$BACKUPS" 2>/dev/null)" ]; then

@@ -104,6 +104,8 @@ cmd_install() {
     die "port $FEED_PORT is already in use; pick another with --port"
   fi
 
+  # Reloading the launchd job would kill a run halfway through a rebase.
+  update_running && die "an update is running (pid $(cat "$STATE/update.lock")); run install again when it's done"
   mkdir -p "$DIY_HOME" "$FEED" "$BUILDS" "$LOGS" "$STATE" "$BACKUPS"
   write_config
   echo "config: $DIY_CONFIG"
@@ -225,7 +227,8 @@ write_config() {
     for g in "${ELECTRON_DATA_DIRS[@]}"; do printf '\n  %s' "$(sq "$g")"; done
     printf '\n)\n'
     for v in UPDATER_CACHE_DIR_NAME KEEP_BUILDS SEQ_START; do echo "$v=$(sq "${!v}")"; done
-    echo "# PATH for the launchd job (it does not read your shell profile)."
+    echo "# PATH for the launchd job (it does not read your shell profile). Re-running install"
+    echo "# rebuilds it from your current shell unless you pass --tool-path."
     echo "TOOL_PATH=$(sq "$TOOL_PATH")"
   } >"$tmp"
   mv -f "$tmp" "$DIY_CONFIG"

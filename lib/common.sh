@@ -188,6 +188,12 @@ wait_for_app_quit() {
   done
 }
 
+# True while an update run holds the lock.
+update_running() {
+  local pid
+  pid="$(cat "$STATE/update.lock" 2>/dev/null)" && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
 register_app() {
   # Only for the real /Applications; never register test copies with LaunchServices.
   [ "$APPS_DIR" = "/Applications" ] && "$LSREGISTER" -f "$1" || true
