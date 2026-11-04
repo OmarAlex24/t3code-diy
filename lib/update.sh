@@ -1,0 +1,375 @@
+# t3code-diy update: rebase the fork on upstream, test, push, build, sign and publish to the feed.
+# shellcheck shell=bash
+
+update_usage() {
+  cat <<EOF
+Usage: t3code-diy update [--force] [--no-push] [--reuse-dist]
+
+  --force       build even when nothing changed since the last build
+  --no-push     do everything except pushing the rebased branch to your fork
+  --reuse-dist  package the web/server output already built in the repo (quick rebuilds)
+
+This is what the daily launchd job runs. Logs go to \$DIY_HOME/logs/update-*.log.
+EOF
+}
+
+cmd_update() {
+  local FORCE=0 NO_PUSH=0 REUSE_DIST=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --force) FORCE=1 ;;
+      --no-push) NO_PUSH=1 ;;
+      --reuse-dist) REUSE_DIST=1 ;;
+      -h | --help) update_usage; return 0 ;;
+      *) echo "unknown option: $arg" >&2; update_usage >&2; return 2 ;;
+    esac
+  done
+  load_config
+  [ "$PUSH" = 1 ] || NO_PUSH=1
+  mkdir -p "$FEED" "$BUILDS" "$LOGS" "$STATE"
+
+  LOG="$LOGS/update-$(date +%Y%m%d-%H%M%S).log"
+  echo "t3code-diy update: logging to $LOG" >&2
+  if [ -t 1 ]; then exec > >(tee -a "$LOG") 2>&1; else exec >>"$LOG" 2>&1; fi
+  # Keep the last 30 run logs.
+  ls -1t "$LOGS"/update-*.log 2>/dev/null | tail -n +31 | while IFS= read -r old; do rm -f "$old"; done
+
+  LOCK="$STATE/update.lock"
+  if ! shlock -f "$LOCK" -p $$; then
+    log "another run holds $LOCK (pid $(cat "$LOCK" 2>/dev/null)); exiting"
+    exit 0
+  fi
+  CLAUDE_PID=""
+  trap update_cleanup EXIT
+
+  export GIT_EDITOR=true GIT_SEQUENCE_EDITOR=true GIT_TERMINAL_PROMPT=0
+  cd "$REPO" || fail "repo missing: $REPO"
+
+  log "== t3code-diy update start (force=$FORCE no_push=$NO_PUSH reuse_dist=$REUSE_DIST)"
+  log "fork: $FORK_URL ($FORK_BRANCH)  upstream: $UPSTREAM_URL ($UPSTREAM_BRANCH)"
+
+  # ------------------------------------------------------------ git: fetch & rebase
+  rebase_in_progress && fail "a rebase is already in progress in $REPO; resolve or abort it by hand"
+  [ -z "$(git status --porcelain --untracked-files=no)" ] || fail "uncommitted changes in $REPO; commit or discard them by hand"
+
+  git fetch --prune upstream "$UPSTREAM_BRANCH" || fail "git fetch upstream failed"
+  git fetch --prune origin "$FORK_BRANCH" || fail "git fetch origin failed"
+  UP_REF="upstream/$UPSTREAM_BRANCH"
+  ORIG="$(git rev-parse "origin/$FORK_BRANCH")"
+  UP="$(git rev-parse "$UP_REF")"
+  log "origin/$FORK_BRANCH=$ORIG $UP_REF=$UP"
+
+  git checkout -q -B "$FORK_BRANCH" "$ORIG" || fail "checkout failed"
+
+  # The fork's migrations must sort after every upstream migration. If upstream reused one of the
+  # fork's ids, renumbering would break any database the fork already migrated (the migrator
+  # refuses a history whose names differ under the highest recorded id). A human decides that.
+  MB="$(git merge-base "$ORIG" "$UP")"
+  local up_max id name
+  up_max="$(migration_entries "$UP" | awk '{print $1}' | sort -n | tail -1)"
+  while read -r id name; do
+    [ -z "$id" ] && continue
+    migration_entries "$UP" | grep -qx "$id $name" && continue
+    if [ "$id" -le "${up_max:-0}" ]; then
+      fail "migration collision: upstream migration ids now reach $up_max and collide with your fork's migration $id $name. Renumbering is unsafe; decide by hand (see README, Caveats)"
+    fi
+  done < <(comm -13 <(migration_entries "$MB" | sort) <(migration_entries "$ORIG" | sort))
+
+  RR_BEFORE="$(ls -1 .git/rr-cache 2>/dev/null | sort)"
+  REBASED=0
+  if git merge-base --is-ancestor "$UP" "$ORIG"; then
+    log "branch already contains $UP_REF; no rebase needed"
+  else
+    log "rebasing $(git rev-list --count "$MB..$ORIG") fork commits onto $UP_REF ($(git rev-list --count "$MB..$UP") new upstream commits)"
+    REBASED=1
+    git rebase "$UP_REF"
+    local used_claude=0 unresolved
+    while rebase_in_progress; do
+      unresolved="$(git diff --name-only --diff-filter=U)"
+      if [ -z "$unresolved" ] && [ "$used_claude" = 0 ]; then
+        log "conflicts resolved by rerere; continuing"
+        git add -u && git rebase --continue && continue
+      fi
+      [ "$used_claude" = 1 ] && break
+      log "conflicts in: $(echo "$unresolved" | tr '\n' ' ')"
+      used_claude=1
+      run_claude_resolver
+    done
+    if rebase_in_progress; then restore_branch; fail "rebase conflicts could not be resolved; the installed version is unchanged"; fi
+    git merge-base --is-ancestor "$UP" HEAD || { restore_branch; fail "rebase result does not contain $UP_REF"; }
+    [ -z "$(git status --porcelain --untracked-files=no)" ] || { restore_branch; fail "rebase left uncommitted changes"; }
+    local dup
+    dup="$(migration_entries HEAD | awk '{print $1}' | sort | uniq -d)"
+    [ -z "$dup" ] || { restore_branch; fail "duplicate migration ids after rebase: $dup"; }
+  fi
+  HEAD_SHA="$(git rev-parse HEAD)"
+  log "result HEAD=$HEAD_SHA ($(git rev-list --count "$UP..HEAD") commits on top of upstream)"
+
+  if [ "$HEAD_SHA" = "$(cat "$STATE/last-built-sha" 2>/dev/null)" ] && [ "$FORCE" = 0 ]; then
+    log "nothing changed since the last build ($HEAD_SHA); done"
+    exit 0
+  fi
+
+  # ------------------------------------------------------------ tests
+  if ! run_gate; then
+    if [ "$REBASED" = 1 ]; then
+      log "tests failed after rebase; restoring $FORK_BRANCH to $ORIG"
+      restore_branch
+      vp i >/dev/null 2>&1
+    fi
+    fail "tests failed; the installed version is unchanged"
+  fi
+  log "tests green"
+
+  # ------------------------------------------------------------ push
+  if [ "$HEAD_SHA" != "$ORIG" ]; then
+    if [ "$NO_PUSH" = 1 ]; then
+      log "skipping push"
+    else
+      git push --force-with-lease="$FORK_BRANCH:$ORIG" origin "HEAD:$FORK_BRANCH" \
+        || fail "push to origin failed (someone pushed in between?)"
+      log "pushed $HEAD_SHA to origin/$FORK_BRANCH"
+    fi
+  fi
+
+  # ------------------------------------------------------------ version
+  local desktop_version base seq version last_version installed
+  desktop_version="$(node -p 'require("./apps/desktop/package.json").version')" || fail "cannot read the desktop version"
+  base="$(echo "$desktop_version" | sed -E 's/[-+].*//' | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')"
+  seq=$(($(cat "$STATE/build-seq" 2>/dev/null || echo "$SEQ_START") + 1))
+  version="$base-nightly.$(date -u +%Y%m%d).$seq"
+  last_version="$(cat "$STATE/last-version" 2>/dev/null)"
+  if [ -n "$last_version" ] && ! version_gt "$version" "$last_version"; then
+    fail "computed version $version is not above the last build $last_version"
+  fi
+  installed="$(plist_version "$INSTALLED_APP")"
+  if [ -n "$installed" ] && ! version_gt "$version" "$installed"; then
+    fail "computed version $version is not above the installed $installed"
+  fi
+  log "building version $version (installed: ${installed:-none}, last build: ${last_version:-none})"
+
+  # ------------------------------------------------------------ build
+  local work="$BUILDS/.work" build_args built_app apps
+  rm -rf "$work"
+  build_args=(--platform mac --target dir --arch arm64 --build-version "$version" --output-dir "$work")
+  [ "$REUSE_DIST" = 1 ] && build_args+=(--skip-build)
+  # No signing identity and no publish config: the app is re-signed and its feed written below.
+  CSC_IDENTITY_AUTO_DISCOVERY=false node scripts/build-desktop-artifact.ts "${build_args[@]}" || fail "desktop build failed"
+  apps=()
+  while IFS= read -r built_app; do apps+=("$built_app"); done < <(find "$work/mac-arm64" -maxdepth 1 -name '*.app' 2>/dev/null)
+  [ "${#apps[@]}" = 1 ] || fail "expected one .app in $work/mac-arm64, found ${#apps[@]}"
+  built_app="${apps[0]}"
+  [ "$(basename "$built_app")" = "$APP_NAME.app" ] \
+    || fail "the build produced '$(basename "$built_app")' but APP_NAME is '$APP_NAME'; fix APP_NAME in $DIY_CONFIG"
+  [ "$(plist_version "$built_app")" = "$version" ] || fail "built app version is $(plist_version "$built_app"), expected $version"
+
+  # The managed policy's feedUrl only accepts https, so the local feed is baked into the bundle.
+  cat >"$built_app/Contents/Resources/app-update.yml" <<EOF
+provider: generic
+url: $FEED_URL
+channel: nightly
+updaterCacheDirName: $UPDATER_CACHE_DIR_NAME
+EOF
+
+  log "signing"
+  sign_app "$built_app" || fail "signing failed"
+  local dr
+  dr="$(designated_requirement "$built_app")"
+  [ "$dr" = "$(expected_requirement)" ] || fail "unexpected designated requirement: $dr"
+  log "designated requirement: $dr"
+
+  local dest="$BUILDS/$version"
+  rm -rf "$dest"; mkdir -p "$dest"
+  mv "$built_app" "$dest/"
+  echo "$HEAD_SHA" >"$dest/commit"
+  echo "$UP" >"$dest/upstream-commit"
+  rm -rf "$work"
+
+  # ------------------------------------------------------------ publish
+  local zip_name="T3-Code-$version-arm64.zip"
+  (cd "$dest" && ditto -c -k --keepParent "$APP_NAME.app" "$FEED/.$zip_name.part") || fail "zip failed"
+  mv -f "$FEED/.$zip_name.part" "$FEED/$zip_name"
+  # The app reads nightly-mac.yml on the nightly channel; latest-mac.yml covers the stable one.
+  write_feed_yml "$FEED/$zip_name" "$version" "$FEED/nightly-mac.yml"
+  cp -f "$FEED/nightly-mac.yml" "$FEED/latest-mac.yml"
+  log "published $zip_name ($(stat -f %z "$FEED/$zip_name") bytes) to $FEED"
+
+  echo "$HEAD_SHA" >"$STATE/last-built-sha"
+  echo "$version" >"$STATE/last-version"
+  echo "$seq" >"$STATE/build-seq"
+
+  # ------------------------------------------------------------ prune
+  local old
+  ls -1 "$BUILDS" | grep -E '^[0-9]' | sort -V | all_but_last "$KEEP_BUILDS" | while read -r old; do
+    log "pruning build $old"; rm -rf "${BUILDS:?}/$old"
+  done
+  ls -1 "$FEED"/T3-Code-*-arm64.zip 2>/dev/null | sort -V | all_but_last "$KEEP_BUILDS" | while read -r old; do
+    log "pruning feed $(basename "$old")"; rm -f "$old"
+  done
+
+  log "== done: $version"
+  notify "build ready" "$version is in the local feed. Use Check for updates in the app."
+  exit 0
+}
+
+update_cleanup() {
+  [ -n "${CLAUDE_PID:-}" ] && kill -- "-$CLAUDE_PID" 2>/dev/null
+  rm -f "$LOCK"
+}
+
+fail() {
+  log "FAILED: $*"
+  notify "update failed" "$* (log: $LOG)"
+  exit 1
+}
+
+rebase_in_progress() { [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; }
+
+restore_branch() {
+  rebase_in_progress && git rebase --abort
+  git checkout -q -f -B "$FORK_BRANCH" "$ORIG"
+  # Forget resolutions recorded during this failed run so they do not replay tomorrow.
+  local e
+  comm -13 <(printf '%s\n' "$RR_BEFORE") <(ls -1 .git/rr-cache 2>/dev/null | sort) \
+    | while read -r e; do [ -n "$e" ] && rm -rf ".git/rr-cache/$e"; done
+  log "restored $FORK_BRANCH to $ORIG"
+}
+
+# Files of one FORK_TEST_GROUPS entry (an extended regex over `git ls-files`).
+group_files() { git ls-files | grep -E "$1" | tr '\n' ' '; }
+
+run_gate() {
+  log "vp i"
+  vp i || return 1
+  local group files
+  for group in "${FORK_TEST_GROUPS[@]+"${FORK_TEST_GROUPS[@]}"}"; do
+    files="$(group_files "$group")"
+    [ -n "$files" ] || { log "test group '$group' matches no files"; return 1; }
+    log "fork tests ($group): $files"
+    # shellcheck disable=SC2086
+    vp test run $files || return 1
+  done
+  [ "$RUN_CHECK_CHANGED" = 1 ] || return 0
+  log "vp run check:changed $UP_REF"
+  local out="$STATE/check-changed.out"
+  vp run check:changed "$UP_REF" 2>&1 | tee "$out"
+  [ "${PIPESTATUS[0]}" = 0 ] && return 0
+  # Only test steps may fail, and only with failures plain upstream has too.
+  local bad
+  bad="$(sed $'s/\x1b\\[[0-9;]*m//g' "$out" | sed -n '/check:changed summary/,$p' \
+    | sed -nE 's/^ *(FAIL|TIMEOUT) +(.+) [0-9.]+s$/\1 \2/p' | grep -vE '^FAIL test( |$)')"
+  if [ -n "$bad" ]; then log "check:changed failed: $bad"; return 1; fi
+  failures_are_preexisting "$out"
+}
+
+# Re-runs the failing test files on a pristine upstream checkout; succeeds only when every
+# failure reported for the fork also fails there (pre-existing upstream failures).
+failures_are_preexisting() {
+  local out="$1" lines files f path up_lines missing
+  lines="$(sed $'s/\x1b\\[[0-9;]*m//g' "$out" | sed -nE 's/^ FAIL  \|[^|]+\| (.+)$/\1/p' | sort -u)"
+  [ -n "$lines" ] || { log "check:changed failed without test failures I can parse"; return 1; }
+  if [ ! -d "$UPSTREAM_WT" ]; then
+    git worktree add -q --detach "$UPSTREAM_WT" "$UP" || return 1
+  fi
+  git -C "$UPSTREAM_WT" checkout -q -f --detach "$UP" || return 1
+  (cd "$UPSTREAM_WT" && vp i >/dev/null 2>&1) || return 1
+  files="$(echo "$lines" | sed -E 's/ > .*//; s/ \[.*//' | sort -u)"
+  : >"$STATE/upstream-test.out"
+  while IFS= read -r f; do
+    path="$(git -C "$UPSTREAM_WT" ls-files | grep -E "(^|/)${f//./\\.}$" | tr '\n' ' ')"
+    [ -n "$path" ] || { log "failing test $f does not exist upstream"; return 1; }
+    # shellcheck disable=SC2086
+    (cd "$UPSTREAM_WT" && vp test run $path) >>"$STATE/upstream-test.out" 2>&1
+  done <<<"$files"
+  up_lines="$(sed $'s/\x1b\\[[0-9;]*m//g' "$STATE/upstream-test.out" | sed -nE 's/^ FAIL  \|[^|]+\| (.+)$/\1/p' | sort -u)"
+  missing="$(comm -23 <(echo "$lines") <(echo "$up_lines"))"
+  if [ -n "$missing" ]; then
+    log "failures not reproduced on plain upstream:"; echo "$missing" | sed 's/^/  /'
+    return 1
+  fi
+  log "every check:changed test failure also fails on plain upstream (pre-existing):"
+  echo "$lines" | sed 's/^/  /'
+}
+
+resolver_prompt() {
+  local group gate_cmds=""
+  for group in "${FORK_TEST_GROUPS[@]+"${FORK_TEST_GROUPS[@]}"}"; do
+    gate_cmds+="   - \`vp test run $(git ls-files | grep -E "$group" | tr '\n' ' ')\`"$'\n'
+  done
+  [ "$RUN_CHECK_CHANGED" = 1 ] && gate_cmds+="   - \`vp run check:changed $UP_REF\`"$'\n'
+  cat <<EOF
+You are running unattended inside $REPO. No human will read or answer questions until you exit.
+
+A \`git rebase $UP_REF\` of the branch $FORK_BRANCH stopped on conflicts. The branch is a
+personal fork of T3 Code ($UPSTREAM_URL) with the owner's own changes on top.
+
+Your job:
+1. Resolve every conflict, keeping BOTH upstream's intent and the fork's intent. Upstream's
+   refactors win on structure; re-apply the fork's additions on top of the new upstream code.
+   Never drop either side's behavior silently.
+2. \`git add\` the resolved files and run \`git rebase --continue\` (GIT_EDITOR is already \`true\`).
+   Repeat for every commit until the rebase is complete (no .git/rebase-merge directory).
+3. Run \`vp i\`, then the same checks the update script runs after you exit:
+${gate_cmds}   Fix what the rebase broke, amending the fork commit that introduced the code
+   (\`git commit --amend\` only while that commit is the one being replayed) or with a follow-up
+   \`fix: ...\` commit after the rebase. A check:changed test failure that also fails on plain
+   $UP_REF is pre-existing; leave it.
+
+Hard rules:
+- Never renumber, rename or edit database migration ids/names in
+  apps/server/src/persistence/Migrations.ts or Migrations/. If a migration id conflict appears,
+  stop and exit, explaining why.
+- Never run git push, git reset, git rebase --abort, git rebase --skip, or anything outside this repo.
+- Never touch ~/.t3, never start a dev server or the app.
+- Run each command on its own (no \`cd\`, \`&&\`, pipes or subshells) so the permission rules match.
+- Commit messages use \`<type>: <description>\`.
+EOF
+  if [ -f "$DIY_HOME/fork-notes.md" ]; then
+    printf '\nNotes from the fork owner about what the fork changes:\n\n'
+    cat "$DIY_HOME/fork-notes.md"
+  fi
+  printf '\nWhen you finish, print one line starting with RESULT: success, or RESULT: failed <reason>.\n'
+}
+
+run_claude_resolver() {
+  local prompt_file="$STATE/claude-prompt.txt" out="$STATE/claude-output.txt"
+  resolver_prompt >"$prompt_file"
+  log "starting Claude Code ($CLAUDE_MODEL) to resolve conflicts (prompt: $prompt_file)"
+  # Any push the agent might attempt goes to a dead URL. The script pushes itself, after the tests.
+  set -m
+  GIT_CONFIG_COUNT=2 \
+    GIT_CONFIG_KEY_0=remote.origin.pushurl GIT_CONFIG_VALUE_0=/dev/null/push-disabled \
+    GIT_CONFIG_KEY_1=remote.upstream.pushurl GIT_CONFIG_VALUE_1=/dev/null/push-disabled \
+    claude -p "$(cat "$prompt_file")" \
+    --model "$CLAUDE_MODEL" \
+    --strict-mcp-config --no-session-persistence --setting-sources project \
+    --permission-mode acceptEdits \
+    --allowedTools "Read" "Edit" "Write" "Glob" "Grep" \
+    "Bash(git status:*)" "Bash(git diff:*)" "Bash(git add:*)" "Bash(git rm:*)" "Bash(git log:*)" \
+    "Bash(git show:*)" "Bash(git rebase --continue:*)" "Bash(git checkout --ours:*)" \
+    "Bash(git checkout --theirs:*)" "Bash(git restore:*)" "Bash(git rerere:*)" \
+    "Bash(git ls-files:*)" "Bash(git merge-base:*)" "Bash(git commit:*)" "Bash(git range-diff:*)" \
+    "Bash(vp i:*)" "Bash(vp install:*)" "Bash(vp test run:*)" "Bash(vp run check:changed:*)" \
+    "Bash(vp run typecheck:*)" "Bash(vp run fmt:*)" "Bash(vp fmt:*)" "Bash(vp lint:*)" \
+    "Bash(ls:*)" "Bash(cat:*)" "Bash(head:*)" "Bash(tail:*)" "Bash(wc:*)" "Bash(rg:*)" "Bash(grep:*)" \
+    --disallowedTools "Bash(git push:*)" "Bash(git reset:*)" "Bash(git rebase --abort:*)" \
+    "Bash(git rebase --skip:*)" "Bash(git checkout -B:*)" "WebFetch" "WebSearch" \
+    </dev/null >"$out" 2>&1 &
+  CLAUDE_PID=$!
+  set +m
+  local waited=0 limit=$((CLAUDE_TIMEOUT_MIN * 60))
+  while kill -0 "$CLAUDE_PID" 2>/dev/null; do
+    sleep 15; waited=$((waited + 15))
+    if [ "$waited" -ge "$limit" ]; then
+      log "Claude Code timed out after ${limit}s; stopping it"
+      kill -- "-$CLAUDE_PID" 2>/dev/null
+      sleep 5; kill -9 -- "-$CLAUDE_PID" 2>/dev/null
+      break
+    fi
+  done
+  wait "$CLAUDE_PID" 2>/dev/null
+  local rc=$?
+  CLAUDE_PID=""
+  log "Claude Code exited ($rc). Output:"
+  sed 's/^/  claude| /' "$out"
+}

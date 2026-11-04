@@ -1,0 +1,43 @@
+#!/bin/bash
+# t3code-diy: build, sign and self-update your own fork of T3 Code on your Mac.
+# Unofficial. Not affiliated with T3 Tools.
+set -uo pipefail
+
+self="$0"
+while [ -L "$self" ]; do
+  link="$(readlink "$self")"
+  case "$link" in /*) self="$link" ;; *) self="$(dirname "$self")/$link" ;; esac
+done
+KIT_SRC="$(cd "$(dirname "$self")/.." && pwd)"
+export KIT_SRC
+
+# shellcheck source=../lib/common.sh
+source "$KIT_SRC/lib/common.sh"
+
+usage() {
+  cat <<EOF
+Usage: t3code-diy <command> [options]
+
+  install      set up ~/.t3code-diy (config, clone, signing identity, launchd jobs)
+  update       rebase on upstream, test, build, sign and publish to the local feed
+               (--force builds even if nothing changed, --no-push skips the push)
+  switch       replace the T3 Code app in /Applications with your newest build
+  rollback     put the official app and your pre-switch data back
+  status       show what is installed, scheduled and built
+  uninstall    remove the launchd jobs (--purge also deletes ~/.t3code-diy)
+
+Run "t3code-diy <command> --help" for options. DIY_HOME overrides ~/.t3code-diy.
+EOF
+}
+
+cmd="${1:-}"
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  install | update | switch | rollback | status | uninstall)
+    # shellcheck disable=SC1090
+    source "$KIT_SRC/lib/$cmd.sh"
+    "cmd_$cmd" "$@"
+    ;;
+  -h | --help | help | "") usage ;;
+  *) echo "unknown command: $cmd" >&2; usage >&2; exit 2 ;;
+esac
