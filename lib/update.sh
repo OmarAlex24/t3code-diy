@@ -209,7 +209,7 @@ EOF
   done
 
   log "== done: $version"
-  notify "build ready" "$version is in the local feed. Use Check for updates in the app."
+  notify "build ready" "$version is in the local feed. Use Check for updates in the app." && log "notification sent"
   exit 0
 }
 
@@ -220,7 +220,7 @@ update_cleanup() {
 
 fail() {
   log "FAILED: $*"
-  notify "update failed" "$* (log: $LOG)"
+  notify "update failed" "$* (log: $LOG)" && log "notification sent"
   exit 1
 }
 

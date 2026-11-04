@@ -69,7 +69,7 @@ die() { echo "error: $*" >&2; exit 1; }
 
 notify() {
   local title="T3 Code DIY: $1" msg="$2"
-  /usr/bin/osascript - "$title" "$msg" <<'EOF' >/dev/null 2>&1 || true
+  /usr/bin/osascript - "$title" "$msg" <<'EOF' >/dev/null 2>&1
 on run argv
   display notification (item 2 of argv) with title (item 1 of argv)
 end run
