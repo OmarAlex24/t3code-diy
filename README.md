@@ -21,9 +21,11 @@ Every day (and when you log in) a launchd job on your Mac:
 T3 Code's own "update available" button then installs the new build, like it does for the
 official one.
 
-If nothing changed since the last build it does nothing. If anything fails, nothing gets pushed or
-published, your branch is put back where it was, the app you have installed stays as it is, and you
-get a macOS notification with the path to the log.
+If nothing changed since the last build it does nothing. If the rebase or the tests fail, nothing
+gets pushed or published and your branch is put back where it was. The push happens right after
+the tests pass, so if the build or signing fails after that, the rebased branch is already on your
+fork but nothing is published. Either way the app you have installed stays as it is, and you get a
+macOS notification with the path to the log.
 
 Everything runs on your machine with your Claude login and your signing key. There's no CI, no
 secrets in GitHub, and no binaries to download: you build your own.
