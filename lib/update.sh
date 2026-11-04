@@ -263,11 +263,20 @@ run_gate() {
   failures_are_preexisting "$out"
 }
 
+# "file > suite > test" for every failed test in vitest output. Vitest prints the project as
+# "|name|" without colors and as a colored badge with them (launchd runs get colors), so both
+# forms are accepted once the escape codes are gone.
+failed_tests() {
+  sed $'s/\x1b\\[[0-9;]*m//g' "$1" \
+    | sed -nE 's/^ FAIL +(\|[^|]*\| +|[^ ]+ +)?([^ ]+\.(test|spec)\.[cm]?[jt]sx?( > .*)?)$/\2/p' \
+    | sort -u
+}
+
 # Re-runs the failing test files on a pristine upstream checkout; succeeds only when every
 # failure reported for the fork also fails there (pre-existing upstream failures).
 failures_are_preexisting() {
   local out="$1" lines files f path up_lines missing
-  lines="$(sed $'s/\x1b\\[[0-9;]*m//g' "$out" | sed -nE 's/^ FAIL  \|[^|]+\| (.+)$/\1/p' | sort -u)"
+  lines="$(failed_tests "$out")"
   [ -n "$lines" ] || { log "check:changed failed without test failures I can parse"; return 1; }
   if [ ! -d "$UPSTREAM_WT" ]; then
     git worktree add -q --detach "$UPSTREAM_WT" "$UP" || return 1
@@ -282,7 +291,7 @@ failures_are_preexisting() {
     # shellcheck disable=SC2086
     (cd "$UPSTREAM_WT" && vp test run $path) >>"$STATE/upstream-test.out" 2>&1
   done <<<"$files"
-  up_lines="$(sed $'s/\x1b\\[[0-9;]*m//g' "$STATE/upstream-test.out" | sed -nE 's/^ FAIL  \|[^|]+\| (.+)$/\1/p' | sort -u)"
+  up_lines="$(failed_tests "$STATE/upstream-test.out")"
   missing="$(comm -23 <(echo "$lines") <(echo "$up_lines"))"
   if [ -n "$missing" ]; then
     log "failures not reproduced on plain upstream:"; echo "$missing" | sed 's/^/  /'
