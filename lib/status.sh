@@ -41,7 +41,7 @@ cmd_status() {
   if [ -n "$installed" ] && is_side_by_side; then
     local pids
     pids="$(installed_app_pids | tr '\n' ' ')"
-    echo "running:   ${pids:+yes (pids $pids)}${pids:-no}"
+    if [ -n "$pids" ]; then echo "running:   yes (pids $pids)"; else echo "running:   no"; fi
   fi
   if [ -d "$REPO/.git" ]; then
     echo "repo:      $(git -C "$REPO" rev-parse --abbrev-ref HEAD) at $(git -C "$REPO" rev-parse --short=12 HEAD)$([ -d "$REPO/.git/rebase-merge" ] && echo ' (REBASE IN PROGRESS)')"
