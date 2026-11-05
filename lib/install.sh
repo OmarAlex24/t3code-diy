@@ -17,6 +17,7 @@ Asks for anything you don't pass. With --yes it asks nothing and uses defaults.
   --no-run-at-login       don't also run the update when you log in
   --resolver NAME         who resolves rebase conflicts: claude (default) or codex
   --model NAME            the resolver's model, default: $RESOLVER_MODEL ('' = the CLI's default)
+  --effort LEVEL          the resolver's effort, e.g. high ('' = the CLI's default)
   --label-prefix PREFIX   launchd label prefix, default: $LABEL_PREFIX
   --test-group REGEX      a group of your fork's tests (regex over git ls-files); repeatable
   --no-check-changed      skip upstream's "vp run check:changed" in the test gate
@@ -48,7 +49,7 @@ EOF
 }
 
 cmd_install() {
-  local assume_yes=0 no_load=0 groups_set=0 edirs_set=0 tool_path_arg="" icon_set=0 had_icon=0 prev_mode
+  local assume_yes=0 no_load=0 effort_set=0 groups_set=0 edirs_set=0 tool_path_arg="" icon_set=0 had_icon=0 prev_mode
   local new_groups=() new_edirs=()
   # Re-running install keeps the existing answers as defaults.
   if [ -f "$DIY_CONFIG" ]; then
@@ -68,6 +69,7 @@ cmd_install() {
       --no-run-at-login) RUN_AT_LOGIN=0 ;;
       --resolver) RESOLVER_PROVIDER="$2"; shift ;;
       --model) RESOLVER_MODEL="$2"; shift ;;
+      --effort) RESOLVER_EFFORT="$2"; effort_set=1; shift ;;
       --label-prefix) LABEL_PREFIX="$2"; shift ;;
       --test-group) new_groups+=("$2"); groups_set=1; shift ;;
       --no-check-changed) RUN_CHECK_CHANGED=0 ;;
@@ -128,6 +130,10 @@ cmd_install() {
   [[ "$LABEL_PREFIX" =~ ^[A-Za-z0-9.-]+$ ]] || die "label prefix may only use letters, digits, dots and dashes"
   valid_resolver_provider "$RESOLVER_PROVIDER" || die "--resolver must be claude or codex"
   valid_resolver_model "$RESOLVER_MODEL" || die "--model '$RESOLVER_MODEL' is not a model name"
+  if ! valid_resolver_effort "$RESOLVER_PROVIDER" "$RESOLVER_EFFORT"; then
+    [ "$effort_set" = 1 ] && die "--effort for $RESOLVER_PROVIDER must be one of: $(resolver_efforts "$RESOLVER_PROVIDER")"
+    RESOLVER_EFFORT=""
+  fi
   valid_resolver_timeout "$RESOLVER_TIMEOUT_MIN" || die "RESOLVER_TIMEOUT_MIN must be 5-600 minutes"
   case "$MODE" in side-by-side | replace) ;; *) die "--mode must be side-by-side or replace" ;; esac
   if is_side_by_side; then

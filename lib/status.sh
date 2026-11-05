@@ -30,7 +30,7 @@ cmd_status() {
   else
     echo "mode:      replace"
   fi
-  echo "resolver:  $RESOLVER_PROVIDER${RESOLVER_MODEL:+ ($RESOLVER_MODEL)}"
+  echo "resolver:  $RESOLVER_PROVIDER${RESOLVER_MODEL:+ ($RESOLVER_MODEL)}${RESOLVER_EFFORT:+, effort $RESOLVER_EFFORT}"
   echo "feed:      $FEED_URL $(curl -fsS --max-time 2 -o /dev/null "${FEED_URL}nightly-mac.yml" 2>/dev/null && echo '(answering)' || echo '(not answering)')"
   printf 'jobs:      '
   for label in "$FEED_LABEL" "$UPDATE_LABEL"; do
@@ -155,8 +155,9 @@ status_json() {
     "$(json_bool "$fork_build")" "$(json_str "$(cat "$STATE/last-version" 2>/dev/null)" null)"
   printf ',"fork":{"url":%s,"branch":%s}' "$(json_str "$FORK_URL")" "$(json_str "$FORK_BRANCH")"
   printf ',"upstream":{"url":%s,"branch":%s}' "$(json_str "$UPSTREAM_URL")" "$(json_str "$UPSTREAM_BRANCH")"
-  printf ',"resolver":{"provider":%s,"model":%s,"timeoutMinutes":%s}' \
-    "$(json_str "$RESOLVER_PROVIDER")" "$(json_str "$RESOLVER_MODEL")" "$((RESOLVER_TIMEOUT_MIN + 0))"
+  printf ',"resolver":{"provider":%s,"model":%s,"effort":%s,"timeoutMinutes":%s}' \
+    "$(json_str "$RESOLVER_PROVIDER")" "$(json_str "$RESOLVER_MODEL")" "$(json_str "$RESOLVER_EFFORT")" \
+    "$((RESOLVER_TIMEOUT_MIN + 0))"
   printf ',"schedule":{"loaded":%s,"hour":%s,"minute":%s,"atLogin":%s,"nextRun":%s}' \
     "$(json_bool "$loaded")" "$((SCHEDULE_HOUR + 0))" "$((SCHEDULE_MINUTE + 0))" \
     "$(json_bool "$RUN_AT_LOGIN")" "$(json_str "$(next_scheduled_run)" null)"

@@ -134,19 +134,29 @@ changed, `--no-push` skips the push), `run` starts the launchd job now and retur
 ## Conflict resolver
 
 When `git rerere` can't replay a resolution, the job hands the stopped rebase to an agent:
-Claude Code (`claude -p`) by default, or Codex (`codex exec`). Pick one, and its model:
+Claude Code (`claude -p`) by default, or Codex (`codex exec`). Pick one, its model, and how hard
+it thinks:
 
 ```sh
 ~/.t3code-diy/kit/bin/t3code-diy config set RESOLVER_PROVIDER codex RESOLVER_MODEL gpt-5.5
 ~/.t3code-diy/kit/bin/t3code-diy config set RESOLVER_PROVIDER claude RESOLVER_MODEL opus
-~/.t3code-diy/kit/bin/t3code-diy config set RESOLVER_MODEL ''   # the CLI's own default
+~/.t3code-diy/kit/bin/t3code-diy config set RESOLVER_EFFORT high
+~/.t3code-diy/kit/bin/t3code-diy config set RESOLVER_MODEL '' RESOLVER_EFFORT ''   # the CLI's own defaults
 ```
+
+`RESOLVER_EFFORT` is empty by default, which means whatever the CLI picks on its own. Claude takes
+`low`, `medium`, `high`, `xhigh` or `max` (it becomes `claude --effort`); Codex takes those plus
+`none` and `minimal` (it becomes `-c model_reasoning_effort=...`). Ultracode, Codex's Ultra and
+Ultrathink aren't on the list: they spin up extra agents or live in the prompt, which isn't what
+you want from a one-shot rebase. Switch providers and an effort the new CLI doesn't have just goes
+back to empty, so `RESOLVER_PROVIDER claude` after Codex's `minimal` leaves you on Claude's default.
 
 `set` checks every value before it writes anything, and won't switch to a CLI that isn't installed
 and logged in. Model names are what T3 Code shows (`opus`, `claude-opus-4-6[1m]`, `gpt-5.5`); the
 agent gets `RESOLVER_TIMEOUT_MIN` minutes (default 90). Configs from before this used
 `CLAUDE_MODEL`; that value carries over as `RESOLVER_MODEL` and the next write renames it.
-`install --resolver codex --model gpt-5.5` does the same at install time.
+`install --resolver codex --model gpt-5.5 --effort high` does the same at install time. Older
+configs have no `RESOLVER_EFFORT` line and keep working; the next write adds it.
 
 `config set` also takes `RESOLVER_TIMEOUT_MIN`, `PUSH` and `RUN_CHECK_CHANGED`. `config get KEY`
 reads any plain setting. Schedule, port, labels and the `SIDE_*` values still go through `install`,
@@ -157,7 +167,7 @@ because launchd or a rebuild has to pick them up.
 Each build puts `T3CODE_DIY_BIN` (the path to `~/.t3code-diy/kit/bin/t3code-diy`) in the app's
 `Info.plist`, next to the side-by-side keys. A fork that knows about it shows a Custom build card
 in Settings, About: the last update and its result, the log, an Update now button and the
-conflict resolver picker. It talks to the kit only through the commands below, so the kit and the
+conflict resolver picker (provider, model and effort, written with `config set`). It talks to the kit only through the commands below, so the kit and the
 app can be updated separately. Without the key (anybody else's fork, or the official app) nothing
 changes. Side-by-side builds also get `T3CODE_DESKTOP_DISPLAY_NAME="$SIDE_APP_NAME"`, which a fork
 that reads it uses for the window title and the About panel.
@@ -182,7 +192,7 @@ changes meaning or goes away; new fields can show up any time, so ignore the one
   },
   "fork": { "url": "git@github.com:you/t3code.git", "branch": "my-changes" },
   "upstream": { "url": "https://github.com/pingdotgg/t3code.git", "branch": "main" },
-  "resolver": { "provider": "claude", "model": "opus", "timeoutMinutes": 90 },
+  "resolver": { "provider": "claude", "model": "opus", "effort": "", "timeoutMinutes": 90 },
   "schedule": { "loaded": true, "hour": 5, "minute": 0, "atLogin": true, "nextRun": "2026-11-05T05:00:00-06:00" },
   "running": false,
   "lastRun": {
@@ -200,6 +210,8 @@ changes meaning or goes away; new fields can show up any time, so ignore the one
   build in the feed, which the app picks up through its own updater.
 - `schedule.nextRun` is the next daily run (local time, ISO 8601), `null` when the job isn't loaded.
   Runs at login aren't predictable, so they aren't in it.
+- `resolver.effort` is `""` when the CLI picks its own effort. Kits from before `RESOLVER_EFFORT`
+  leave it out, so treat a missing one the same way.
 - `running` is true from the moment launchd starts the job until it exits.
 - `lastRun` is `null` before the first run. `result` is one of `ok` (a new build is in the feed),
   `up_to_date` (nothing changed), `running`, `conflict_unresolved`, `tests_failed`,

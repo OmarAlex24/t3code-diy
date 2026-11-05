@@ -15,9 +15,11 @@ SCHEDULE_HOUR=5
 SCHEDULE_MINUTE=0
 RUN_AT_LOGIN=1
 PUSH=1
-# Who resolves rebase conflicts: claude (claude -p) or codex (codex exec). Empty model = the CLI's default.
+# Who resolves rebase conflicts: claude (claude -p) or codex (codex exec). Empty model or effort =
+# the CLI's default.
 RESOLVER_PROVIDER="claude"
 RESOLVER_MODEL="opus"
+RESOLVER_EFFORT=""
 RESOLVER_TIMEOUT_MIN=90
 TOOL_PATH=""
 # side-by-side: your build is its own app next to the official one (SIDE_* below).
@@ -77,6 +79,21 @@ RESOLVER_MODEL_RE='^[A-Za-z0-9][]A-Za-z0-9._:/[-]{0,127}$'
 valid_resolver_provider() { case "$1" in claude | codex) return 0 ;; *) return 1 ;; esac; }
 valid_resolver_model() { [ -z "$1" ] || [[ "$1" =~ $RESOLVER_MODEL_RE ]]; }
 valid_resolver_timeout() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 5 ] && [ "$1" -le 600 ]; }
+
+# Effort levels each CLI takes headless: claude --effort and codex's model_reasoning_effort.
+# Workflow levels (Claude's ultracode, Codex's ultra) aren't effort for a one-shot rebase.
+# T3 Code keeps the same lists as DIY_RESOLVER_EFFORTS (packages/contracts/src/diy.ts).
+resolver_efforts() {
+  case "$1" in
+    claude) echo "low medium high xhigh max" ;;
+    codex) echo "none minimal low medium high xhigh max" ;;
+  esac
+}
+# valid_resolver_effort PROVIDER EFFORT; empty means the CLI's default and is always fine.
+valid_resolver_effort() {
+  [ -z "$2" ] && return 0
+  case " $(resolver_efforts "$1") " in *" $2 "*) return 0 ;; *) return 1 ;; esac
+}
 
 # Why the resolver CLI can't run right now (empty when it can). Needs TOOL_PATH on PATH.
 resolver_problem() {
@@ -283,9 +300,10 @@ write_config() {
     done
     echo "# 1 = push the rebased branch back to your fork (force-with-lease) after tests pass"
     echo "PUSH=$(sq "$PUSH")"
-    echo "# Conflict resolver: claude or codex, the model (empty = the CLI's default) and a time limit."
+    echo "# Conflict resolver: claude or codex, the model and effort (empty = the CLI's default) and a"
+    echo "# time limit. Effort: claude takes low, medium, high, xhigh, max; codex also none and minimal."
     echo "# 't3code-diy config set RESOLVER_PROVIDER codex RESOLVER_MODEL gpt-5.5' changes them."
-    for v in RESOLVER_PROVIDER RESOLVER_MODEL RESOLVER_TIMEOUT_MIN; do echo "$v=$(sq "${!v}")"; done
+    for v in RESOLVER_PROVIDER RESOLVER_MODEL RESOLVER_EFFORT RESOLVER_TIMEOUT_MIN; do echo "$v=$(sq "${!v}")"; done
     echo "# Your fork's tests: each entry is a regex over 'git ls-files', run as one 'vp test run'."
     printf 'FORK_TEST_GROUPS=('
     for g in "${FORK_TEST_GROUPS[@]+"${FORK_TEST_GROUPS[@]}"}"; do printf '\n  %s' "$(sq "$g")"; done

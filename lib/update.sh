@@ -570,8 +570,22 @@ EOF
 
 resolver_label() {
   case "$RESOLVER_PROVIDER" in codex) printf 'Codex' ;; *) printf 'Claude Code' ;; esac
-  [ -n "$RESOLVER_MODEL" ] && printf ' (%s)' "$RESOLVER_MODEL"
+  local detail="$RESOLVER_MODEL"
+  [ -n "$RESOLVER_EFFORT" ] && valid_resolver_effort "$RESOLVER_PROVIDER" "$RESOLVER_EFFORT" \
+    && detail="${detail:+$detail, }effort $RESOLVER_EFFORT"
+  [ -n "$detail" ] && printf ' (%s)' "$detail"
   return 0
+}
+
+# The configured effort when this provider's CLI takes it. A hand-edited config can hold anything,
+# so a level the CLI lacks is logged and left off rather than passed to it.
+resolver_effort() {
+  [ -n "$RESOLVER_EFFORT" ] || return 0
+  if valid_resolver_effort "$RESOLVER_PROVIDER" "$RESOLVER_EFFORT"; then
+    printf '%s' "$RESOLVER_EFFORT"
+  else
+    log "ignoring RESOLVER_EFFORT='$RESOLVER_EFFORT': $RESOLVER_PROVIDER takes $(resolver_efforts "$RESOLVER_PROVIDER")" >&2
+  fi
 }
 
 # ---------------------------------------------------------------- no push while the agent runs
@@ -676,8 +690,10 @@ run_resolver() {
 
 # claude -p with an allowlist: edits, git add/commit/rebase --continue and the test commands only.
 resolver_cmd_claude() {
-  local model=()
+  local model=() effort
   [ -n "$RESOLVER_MODEL" ] && model=(--model "$RESOLVER_MODEL")
+  effort="$(resolver_effort)"
+  [ -n "$effort" ] && model+=(--effort "$effort")
   claude -p "$(cat "$1")" \
     "${model[@]+"${model[@]}"}" \
     --strict-mcp-config --no-session-persistence --setting-sources project \
@@ -700,8 +716,11 @@ resolver_cmd_claude() {
 # .git and vp i writes outside the repo, both of which workspace-write refuses; the push lockout
 # above is what keeps it from pushing. The prompt comes in on stdin.
 resolver_cmd_codex() {
-  local model=()
+  local model=() effort
   [ -n "$RESOLVER_MODEL" ] && model=(-m "$RESOLVER_MODEL")
+  # A TOML string; the effort is one plain word, so the quotes need no escaping.
+  effort="$(resolver_effort)"
+  [ -n "$effort" ] && model+=(-c "model_reasoning_effort=\"$effort\"")
   codex exec -C "$REPO" "${model[@]+"${model[@]}"}" \
     --sandbox danger-full-access --ephemeral --color never \
     -o "$STATE/resolver-last-message.txt" - <"$1"
