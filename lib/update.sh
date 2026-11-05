@@ -74,19 +74,16 @@ cmd_update() {
 
   git checkout -q -B "$FORK_BRANCH" "$ORIG" || fail "checkout failed"
 
-  # The fork's migrations must sort after every upstream migration. If upstream reused one of the
-  # fork's ids, renumbering would break any database the fork already migrated (the migrator
-  # refuses a history whose names differ under the highest recorded id). A human decides that.
+  # Upstream's numbered migration list belongs to upstream. A fork migration in it takes the next
+  # free id, which upstream eventually ships too, and renumbering breaks databases that already
+  # ran it. Fork migrations live in their own list and history table instead (README, Caveats).
   MB="$(git merge-base "$ORIG" "$UP")"
-  local up_max id name
-  up_max="$(migration_entries "$UP" | awk '{print $1}' | sort -n | tail -1)"
+  local id name
   while read -r id name; do
     [ -z "$id" ] && continue
     migration_entries "$UP" | grep -qx "$id $name" && continue
-    if [ "$id" -le "${up_max:-0}" ]; then
-      RUN_RESULT=migration_collision
-      fail "migration collision: upstream migration ids now reach $up_max and collide with your fork's migration $id $name. Renumbering is unsafe; decide by hand (see README, Caveats)"
-    fi
+    RUN_RESULT=migration_collision
+    fail "migration in upstream's list: your fork adds $id $name to apps/server/src/persistence/Migrations.ts. Move it to the fork's own migration table by hand (see README, Caveats)"
   done < <(comm -13 <(migration_entries "$MB" | sort) <(migration_entries "$ORIG" | sort))
 
   RR_BEFORE="$(ls -1 .git/rr-cache 2>/dev/null | sort)"
@@ -117,9 +114,8 @@ cmd_update() {
     fi
     git merge-base --is-ancestor "$UP" HEAD || { restore_branch; fail "rebase result does not contain $UP_REF"; }
     [ -z "$(git status --porcelain --untracked-files=no)" ] || { restore_branch; fail "rebase left uncommitted changes"; }
-    local dup
-    dup="$(migration_entries HEAD | awk '{print $1}' | sort | uniq -d)"
-    [ -z "$dup" ] || { restore_branch; RUN_RESULT=migration_collision; fail "duplicate migration ids after rebase: $dup"; }
+    [ "$(migration_entries HEAD)" = "$(migration_entries "$UP")" ] \
+      || { restore_branch; RUN_RESULT=migration_collision; fail "upstream's migration list differs from $UP_REF after the rebase"; }
   fi
   HEAD_SHA="$(git rev-parse HEAD)"
   log "result HEAD=$HEAD_SHA ($(git rev-list --count "$UP..HEAD") commits on top of upstream)"
@@ -553,9 +549,10 @@ ${gate_cmds}   Fix what the rebase broke, amending the fork commit that introduc
    investigate it, don't edit upstream code to work around it, just mention it.
 
 Hard rules:
-- Never renumber, rename or edit database migration ids/names in
-  apps/server/src/persistence/Migrations.ts or Migrations/. If a migration id conflict appears,
-  stop and exit, explaining why.
+- Never renumber, rename or edit database migration ids/names. Upstream's list in
+  apps/server/src/persistence/Migrations.ts must end up exactly as $UP_REF has it, and the fork's
+  migrations stay in the fork's own list (ForkMigrations.ts in Omar's fork). If a migration
+  conflict needs more than taking upstream's side of Migrations.ts, stop and exit, explaining why.
 - Never run git push, git reset, git rebase --abort, git rebase --skip, or anything outside this repo.
 - Never touch ~/.t3, never start a dev server or the app.
 - Run each command on its own (no \`cd\`, \`&&\`, pipes or subshells) so the permission rules match.

@@ -370,14 +370,18 @@ Both modes:
 - **T3 Connect** works because the build uses the public Clerk and relay settings upstream ships in
   `.env.example` (install copies it to `.env`). If upstream changes or removes those, Connect stops
   working in your build.
-- **Migration collisions.** If your fork adds a database migration, it takes the next free id. When
-  upstream later ships its own migration with that id, the two can't both live in one database. The
-  job stops with a notification instead of guessing; you decide (usually: move your migration to a
-  new id and accept that databases that already ran it need fixing by hand). In side-by-side mode
-  your build has its own database, so this never touches the official app's. In replace mode it's
-  why **rollback only works until upstream ships a conflicting migration**: after that, the
-  official app refuses a database your fork migrated. Rollback restores your pre-switch database
-  for that reason, but anything you did in the fork build stays in the fork-era copy.
+- **Database migrations.** Upstream numbers its migrations in
+  `apps/server/src/persistence/Migrations.ts`, and the migrator skips every id up to the highest one
+  a database recorded. A fork migration added there takes the next free id, which upstream ships
+  sooner or later, and then the two can't both live in one database. So keep your fork's migrations
+  in their own list with their own history table (in Omar's fork, `ForkMigrations.ts` and
+  `t3_fork_migrations`), and leave upstream's list exactly as upstream has it. The job checks this
+  before every rebase and stops with `migration_collision` if your fork adds anything to upstream's
+  list; moving it out is up to you, since databases that already ran it need their history moved
+  too. The official app never reads the fork's table, so the fork's tables in a database are just
+  extra tables to it. Rollback still restores your pre-switch database, because the fork build may
+  have run upstream migrations newer than the official release; anything you did in the fork build
+  stays in the fork-era copy.
 - **The conflict agent runs unattended.** Claude Code gets permission to edit files, run git
   add/commit/rebase --continue and the test commands in the managed repo, nothing else (`git push`,
   `git config` and `git remote` are denied). Codex has no per-command allowlist, so it runs with its

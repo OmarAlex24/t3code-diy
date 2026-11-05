@@ -47,9 +47,8 @@ cmd_rollback() {
   fi
   wait_for_app_quit "$assume_yes"
 
-  # The fork-era database may hold your fork's migration. The official app opens it today but
-  # refuses it once upstream ships its own migration with that id, so the pre-switch data comes
-  # back and the fork-era data is kept here.
+  # The fork-era database may hold upstream migrations newer than the official release, which the
+  # official app refuses, so the pre-switch data comes back and the fork-era data is kept here.
   local aside d name
   aside="$BACKUPS/$(date +%Y%m%d-%H%M%S)-fork-state"
   mkdir -p "$aside"
