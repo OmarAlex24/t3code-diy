@@ -14,7 +14,8 @@ Asks for anything you don't pass. With --yes it asks nothing and uses defaults.
   --port N                local feed port, default: $FEED_PORT
   --hour H --minute M     daily run time, default: $SCHEDULE_HOUR:$(printf %02d "$SCHEDULE_MINUTE")
   --no-run-at-login       don't also run the update when you log in
-  --model NAME            Claude model for conflicts, default: $CLAUDE_MODEL
+  --resolver NAME         who resolves rebase conflicts: claude (default) or codex
+  --model NAME            the resolver's model, default: $RESOLVER_MODEL ('' = the CLI's default)
   --label-prefix PREFIX   launchd label prefix, default: $LABEL_PREFIX
   --test-group REGEX      a group of your fork's tests (regex over git ls-files); repeatable
   --no-check-changed      skip upstream's "vp run check:changed" in the test gate
@@ -64,7 +65,8 @@ cmd_install() {
       --hour) SCHEDULE_HOUR="$2"; shift ;;
       --minute) SCHEDULE_MINUTE="$2"; shift ;;
       --no-run-at-login) RUN_AT_LOGIN=0 ;;
-      --model) CLAUDE_MODEL="$2"; shift ;;
+      --resolver) RESOLVER_PROVIDER="$2"; shift ;;
+      --model) RESOLVER_MODEL="$2"; shift ;;
       --label-prefix) LABEL_PREFIX="$2"; shift ;;
       --test-group) new_groups+=("$2"); groups_set=1; shift ;;
       --no-check-changed) RUN_CHECK_CHANGED=0 ;;
@@ -105,7 +107,8 @@ cmd_install() {
     ask FEED_PORT "Local feed port"
     ask SCHEDULE_HOUR "Daily run hour (0-23)"
     ask SCHEDULE_MINUTE "Daily run minute"
-    ask CLAUDE_MODEL "Claude model for conflict resolution"
+    ask RESOLVER_PROVIDER "Conflict resolver (claude or codex)"
+    ask RESOLVER_MODEL "Model for conflict resolution"
     if [ "${#FORK_TEST_GROUPS[@]}" = 0 ]; then
       echo "Your fork's own tests run before every build. Give a regex over 'git ls-files' per group,"
       echo "e.g. '^apps/server/src/myfeature/.*\.test\.ts$'. Empty line to finish."
@@ -119,6 +122,9 @@ cmd_install() {
   [[ "$SCHEDULE_HOUR" =~ ^[0-9]+$ && "$SCHEDULE_HOUR" -le 23 ]] || die "hour must be 0-23"
   [[ "$SCHEDULE_MINUTE" =~ ^[0-9]+$ && "$SCHEDULE_MINUTE" -le 59 ]] || die "minute must be 0-59"
   [[ "$LABEL_PREFIX" =~ ^[A-Za-z0-9.-]+$ ]] || die "label prefix may only use letters, digits, dots and dashes"
+  valid_resolver_provider "$RESOLVER_PROVIDER" || die "--resolver must be claude or codex"
+  valid_resolver_model "$RESOLVER_MODEL" || die "--model '$RESOLVER_MODEL' is not a model name"
+  valid_resolver_timeout "$RESOLVER_TIMEOUT_MIN" || die "RESOLVER_TIMEOUT_MIN must be 5-600 minutes"
   case "$MODE" in side-by-side | replace) ;; *) die "--mode must be side-by-side or replace" ;; esac
   if is_side_by_side; then
     SIDE_T3_HOME="${SIDE_T3_HOME/#\~/$HOME}"
@@ -216,7 +222,13 @@ check_prereqs() {
   else
     miss "Rust (cargo)" "install from https://rustup.rs, then: rustup target add aarch64-apple-darwin"
   fi
-  if type -P claude >/dev/null; then
+  if [ "$RESOLVER_PROVIDER" = codex ]; then
+    if type -P codex >/dev/null; then
+      codex login status >/dev/null 2>&1 || miss "Codex login" "run: codex login"
+    else
+      miss "Codex CLI (codex)" "see https://developers.openai.com/codex/cli"
+    fi
+  elif type -P claude >/dev/null; then
     claude auth status --json 2>/dev/null | grep -q '"loggedIn": *true' \
       || miss "Claude Code login" "run: claude auth login (or start claude once and log in)"
   else
@@ -249,55 +261,12 @@ build_tool_path() {
     if [ "$(basename "$r")" = node ]; then dirs+=("$(dirname "$r")"); else dirs+=("$(dirname "$p")"); fi
   fi
   p="$(type -P vp || find_vp)" && dirs+=("$(dirname "$p")")
-  for t in cargo claude git pnpm gh; do
+  for t in cargo claude codex git pnpm gh; do
     p="$(type -P "$t")" && dirs+=("$(dirname "$p")")
   done
   [ -d "$HOME/.cargo/bin" ] && dirs+=("$HOME/.cargo/bin")
   dirs+=(/usr/bin /bin /usr/sbin /sbin)
   printf '%s\n' "${dirs[@]}" | awk '!seen[$0]++' | paste -sd: -
-}
-
-# Single-quotes a value for the config file (readable, unlike printf %q).
-sq() { local q="'\\''"; printf "'%s'" "${1//\'/$q}"; }
-
-write_config() {
-  local tmp="$DIY_CONFIG.tmp" g v
-  {
-    echo "# t3code-diy config. Written by 'install'; edit freely, it is sourced by bash."
-    for v in FORK_URL FORK_BRANCH UPSTREAM_URL UPSTREAM_BRANCH FEED_PORT LABEL_PREFIX \
-      SCHEDULE_HOUR SCHEDULE_MINUTE RUN_AT_LOGIN; do
-      echo "$v=$(sq "${!v}")"
-    done
-    echo "# 1 = push the rebased branch back to your fork (force-with-lease) after tests pass"
-    echo "PUSH=$(sq "$PUSH")"
-    echo "CLAUDE_MODEL=$(sq "$CLAUDE_MODEL")"
-    echo "CLAUDE_TIMEOUT_MIN=$(sq "$CLAUDE_TIMEOUT_MIN")"
-    echo "# Your fork's tests: each entry is a regex over 'git ls-files', run as one 'vp test run'."
-    printf 'FORK_TEST_GROUPS=('
-    for g in "${FORK_TEST_GROUPS[@]+"${FORK_TEST_GROUPS[@]}"}"; do printf '\n  %s' "$(sq "$g")"; done
-    printf '\n)\n'
-    echo "RUN_CHECK_CHANGED=$(sq "$RUN_CHECK_CHANGED")"
-    echo "# side-by-side: your build is its own app next to the official one (install-app)."
-    echo "# replace: it takes over the official app (switch/rollback). See README, Modes."
-    echo "MODE=$(sq "$MODE")"
-    echo "# App icon: a 1024px PNG, baked into each build; after changing it run update --force."
-    echo "# Relative paths are inside the repo being built. Empty keeps the stock icon."
-    echo "ICON=$(sq "$ICON")"
-    echo "# Side-by-side app. Baked into each build; after changing them run update --force,"
-    echo "# then quit the app and run install-app."
-    for v in SIDE_APP_NAME SIDE_BUNDLE_ID SIDE_USER_DATA_NAME SIDE_T3_HOME SIDE_PORT; do echo "$v=$(sq "${!v}")"; done
-    echo "# The build's app name follows from the nightly version. Replace mode installs it under"
-    echo "# that name and backs up USERDATA_DIR and ELECTRON_DATA_DIRS on switch."
-    for v in APP_NAME APPS_DIR USERDATA_DIR; do echo "$v=$(sq "${!v}")"; done
-    printf 'ELECTRON_DATA_DIRS=('
-    for g in "${ELECTRON_DATA_DIRS[@]}"; do printf '\n  %s' "$(sq "$g")"; done
-    printf '\n)\n'
-    for v in UPDATER_CACHE_DIR_NAME KEEP_BUILDS SEQ_START; do echo "$v=$(sq "${!v}")"; done
-    echo "# PATH for the launchd job (it does not read your shell profile). Re-running install"
-    echo "# rebuilds it from your current shell unless you pass --tool-path."
-    echo "TOOL_PATH=$(sq "$TOOL_PATH")"
-  } >"$tmp"
-  mv -f "$tmp" "$DIY_CONFIG"
 }
 
 copy_kit() {

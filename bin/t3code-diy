@@ -10,6 +10,11 @@ while [ -L "$self" ]; do
 done
 KIT_SRC="$(cd "$(dirname "$self")/.." && pwd)"
 export KIT_SRC
+# The installed copy lives in $DIY_HOME/kit, so it finds its own home (the app runs it with no DIY_HOME).
+if [ -z "${DIY_HOME:-}" ] && [ "$(basename "$KIT_SRC")" = kit ] && [ -f "$KIT_SRC/../config" ]; then
+  DIY_HOME="$(cd "$KIT_SRC/.." && pwd)"
+  export DIY_HOME
+fi
 
 # shellcheck source=../lib/common.sh
 source "$KIT_SRC/lib/common.sh"
@@ -25,7 +30,10 @@ Usage: t3code-diy <command> [options]
   uninstall-app  side-by-side mode: remove that app (its data stays)
   switch         replace mode: replace the official app in /Applications with your build
   rollback       replace mode: put the official app and your pre-switch data back
-  status         show what is installed, scheduled and built
+  run            start the update job in launchd now and return (status shows progress)
+  status         show what is installed, scheduled and built (--json for scripts)
+  log            print the last run's log (--tail N)
+  config         get or set one setting, e.g. config set RESOLVER_PROVIDER codex
   uninstall      remove the launchd jobs (--purge also deletes ~/.t3code-diy)
 
 Run "t3code-diy <command> --help" for options. DIY_HOME overrides ~/.t3code-diy.
@@ -35,7 +43,7 @@ EOF
 cmd="${1:-}"
 [ $# -gt 0 ] && shift
 case "$cmd" in
-  install | update | install-app | uninstall-app | switch | rollback | status | uninstall)
+  install | update | install-app | uninstall-app | switch | rollback | status | uninstall | config | run | log)
     # shellcheck disable=SC1090
     source "$KIT_SRC/lib/$cmd.sh"
     "cmd_${cmd//-/_}" "$@"

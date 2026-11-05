@@ -15,8 +15,10 @@ SCHEDULE_HOUR=5
 SCHEDULE_MINUTE=0
 RUN_AT_LOGIN=1
 PUSH=1
-CLAUDE_MODEL="opus"
-CLAUDE_TIMEOUT_MIN=90
+# Who resolves rebase conflicts: claude (claude -p) or codex (codex exec). Empty model = the CLI's default.
+RESOLVER_PROVIDER="claude"
+RESOLVER_MODEL="opus"
+RESOLVER_TIMEOUT_MIN=90
 TOOL_PATH=""
 # side-by-side: your build is its own app next to the official one (SIDE_* below).
 # replace: your build takes over the official app's name, bundle id and data (switch/rollback).
@@ -55,10 +57,40 @@ load_config() {
 }
 
 # Configs written before MODE existed were replace-mode installs; keep them that way.
+# Configs from before RESOLVER_* had CLAUDE_MODEL/CLAUDE_TIMEOUT_MIN; those carry over.
 source_config() {
   grep -q '^MODE=' "$DIY_CONFIG" || MODE="replace"
+  local CLAUDE_MODEL="" CLAUDE_TIMEOUT_MIN=""
   # shellcheck disable=SC1090
   source "$DIY_CONFIG"
+  if ! grep -q '^RESOLVER_PROVIDER=' "$DIY_CONFIG"; then
+    RESOLVER_PROVIDER="claude"
+    [ -n "$CLAUDE_MODEL" ] && RESOLVER_MODEL="$CLAUDE_MODEL"
+    [ -n "$CLAUDE_TIMEOUT_MIN" ] && RESOLVER_TIMEOUT_MIN="$CLAUDE_TIMEOUT_MIN"
+  fi
+  return 0
+}
+
+# Model slugs as T3 Code shows them (opus, gpt-5.5, claude-opus-4-6[1m], openai/gpt-6.1-sol).
+# Empty means the CLI's own default. Anything else is refused, so a value never reaches a shell.
+RESOLVER_MODEL_RE='^[A-Za-z0-9][]A-Za-z0-9._:/[-]{0,127}$'
+valid_resolver_provider() { case "$1" in claude | codex) return 0 ;; *) return 1 ;; esac; }
+valid_resolver_model() { [ -z "$1" ] || [[ "$1" =~ $RESOLVER_MODEL_RE ]]; }
+valid_resolver_timeout() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 5 ] && [ "$1" -le 600 ]; }
+
+# Why the resolver CLI can't run right now (empty when it can). Needs TOOL_PATH on PATH.
+resolver_problem() {
+  case "$1" in
+    claude)
+      type -P claude >/dev/null || { echo "the claude CLI is not installed"; return; }
+      claude auth status --json 2>/dev/null | grep -q '"loggedIn": *true' \
+        || echo "the claude CLI is not logged in (run: claude auth login)"
+      ;;
+    codex)
+      type -P codex >/dev/null || { echo "the codex CLI is not installed"; return; }
+      codex login status >/dev/null 2>&1 || echo "the codex CLI is not logged in (run: codex login)"
+      ;;
+  esac
 }
 
 is_side_by_side() { [ "$MODE" = "side-by-side" ]; }
@@ -237,3 +269,68 @@ register_app() {
   # Only for the real /Applications; never register test copies with LaunchServices.
   [ "$APPS_DIR" = "/Applications" ] && "$LSREGISTER" -f "$1" || true
 }
+
+# Single-quotes a value for the config file (readable, unlike printf %q).
+sq() { local q="'\\''"; printf "'%s'" "${1//\'/$q}"; }
+
+write_config() {
+  local tmp="$DIY_CONFIG.tmp" g v
+  {
+    echo "# t3code-diy config. Written by 'install'; edit freely, it is sourced by bash."
+    for v in FORK_URL FORK_BRANCH UPSTREAM_URL UPSTREAM_BRANCH FEED_PORT LABEL_PREFIX \
+      SCHEDULE_HOUR SCHEDULE_MINUTE RUN_AT_LOGIN; do
+      echo "$v=$(sq "${!v}")"
+    done
+    echo "# 1 = push the rebased branch back to your fork (force-with-lease) after tests pass"
+    echo "PUSH=$(sq "$PUSH")"
+    echo "# Conflict resolver: claude or codex, the model (empty = the CLI's default) and a time limit."
+    echo "# 't3code-diy config set RESOLVER_PROVIDER codex RESOLVER_MODEL gpt-5.5' changes them."
+    for v in RESOLVER_PROVIDER RESOLVER_MODEL RESOLVER_TIMEOUT_MIN; do echo "$v=$(sq "${!v}")"; done
+    echo "# Your fork's tests: each entry is a regex over 'git ls-files', run as one 'vp test run'."
+    printf 'FORK_TEST_GROUPS=('
+    for g in "${FORK_TEST_GROUPS[@]+"${FORK_TEST_GROUPS[@]}"}"; do printf '\n  %s' "$(sq "$g")"; done
+    printf '\n)\n'
+    echo "RUN_CHECK_CHANGED=$(sq "$RUN_CHECK_CHANGED")"
+    echo "# side-by-side: your build is its own app next to the official one (install-app)."
+    echo "# replace: it takes over the official app (switch/rollback). See README, Modes."
+    echo "MODE=$(sq "$MODE")"
+    echo "# App icon: a 1024px PNG, baked into each build; after changing it run update --force."
+    echo "# Relative paths are inside the repo being built. Empty keeps the stock icon."
+    echo "ICON=$(sq "$ICON")"
+    echo "# Side-by-side app. Baked into each build; after changing them run update --force,"
+    echo "# then quit the app and run install-app."
+    for v in SIDE_APP_NAME SIDE_BUNDLE_ID SIDE_USER_DATA_NAME SIDE_T3_HOME SIDE_PORT; do echo "$v=$(sq "${!v}")"; done
+    echo "# The build's app name follows from the nightly version. Replace mode installs it under"
+    echo "# that name and backs up USERDATA_DIR and ELECTRON_DATA_DIRS on switch."
+    for v in APP_NAME APPS_DIR USERDATA_DIR; do echo "$v=$(sq "${!v}")"; done
+    printf 'ELECTRON_DATA_DIRS=('
+    for g in "${ELECTRON_DATA_DIRS[@]}"; do printf '\n  %s' "$(sq "$g")"; done
+    printf '\n)\n'
+    for v in UPDATER_CACHE_DIR_NAME KEEP_BUILDS SEQ_START; do echo "$v=$(sq "${!v}")"; done
+    echo "# PATH for the launchd job (it does not read your shell profile). Re-running install"
+    echo "# rebuilds it from your current shell unless you pass --tool-path."
+    echo "TOOL_PATH=$(sq "$TOOL_PATH")"
+  } >"$tmp"
+  mv -f "$tmp" "$DIY_CONFIG"
+}
+
+# ---------------------------------------------------------------- time and JSON (bash 3.2, BSD date)
+iso_colon() { sed -E 's/([+-][0-9]{2})([0-9]{2})$/\1:\2/'; }
+iso_now() { date +%Y-%m-%dT%H:%M:%S%z | iso_colon; }
+iso_from_epoch() { date -j -f %s "$1" +%Y-%m-%dT%H:%M:%S%z 2>/dev/null | iso_colon; }
+# "2026-11-04 18:39:04" (the log's local time) or "20261104-183904" (a log's name) as ISO 8601.
+iso_from_local() {
+  local fmt='%Y-%m-%d %H:%M:%S'
+  case "$1" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9]*) fmt='%Y%m%d-%H%M%S' ;; esac
+  date -j -f "$fmt" "$1" +%Y-%m-%dT%H:%M:%S%z 2>/dev/null | iso_colon
+}
+
+# A JSON string, or null for an empty value when the second argument is "null".
+json_str() {
+  local s="$1"
+  if [ -z "$s" ] && [ "${2:-}" = null ]; then printf null; return; fi
+  s="${s//\\/\\\\}"; s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"; s="${s//$'\t'/\\t}"; s="${s//$'\r'/\\r}"
+  printf '"%s"' "$(printf %s "$s" | tr -d '\000-\010\013\014\016-\037')"
+}
+json_bool() { if [ "$1" = 1 ]; then printf true; else printf false; fi; }

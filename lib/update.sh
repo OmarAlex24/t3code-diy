@@ -39,8 +39,14 @@ cmd_update() {
     log "another run holds $LOCK (pid $(cat "$LOCK" 2>/dev/null)); exiting"
     exit 0
   fi
-  CLAUDE_PID=""
+  RESOLVER_PID=""
   PATCHED=0
+  STAGE="prepare"
+  RUN_RESULT=""
+  RUN_REASON=""
+  RUN_VERSION=""
+  RUN_STARTED="$(iso_now)"
+  write_run_record running ""
   trap update_cleanup EXIT
 
   export GIT_EDITOR=true GIT_SEQUENCE_EDITOR=true GIT_TERMINAL_PROMPT=0
@@ -48,10 +54,11 @@ cmd_update() {
 
   log "== t3code-diy update start (mode=$MODE force=$FORCE no_push=$NO_PUSH reuse_dist=$REUSE_DIST)"
   log "fork: $FORK_URL ($FORK_BRANCH)  upstream: $UPSTREAM_URL ($UPSTREAM_BRANCH)"
-  log "tools: node $(node -v 2>&1) ($(type -P node)), $(vp --version 2>&1 | head -1), $(cargo --version 2>&1), claude $(claude --version 2>&1 | head -1)"
+  log "tools: node $(node -v 2>&1) ($(type -P node)), $(vp --version 2>&1 | head -1), $(cargo --version 2>&1), $RESOLVER_PROVIDER $("$RESOLVER_PROVIDER" --version 2>&1 | head -1)"
 
   # ------------------------------------------------------------ git: fetch & rebase
   rebase_in_progress && fail "a rebase is already in progress in $REPO; resolve or abort it by hand"
+  restore_push_urls
   revert_leftover_side_patch
   [ -z "$(git status --porcelain --untracked-files=no)" ] || fail "uncommitted changes in $REPO; commit or discard them by hand"
 
@@ -74,55 +81,66 @@ cmd_update() {
     [ -z "$id" ] && continue
     migration_entries "$UP" | grep -qx "$id $name" && continue
     if [ "$id" -le "${up_max:-0}" ]; then
+      RUN_RESULT=migration_collision
       fail "migration collision: upstream migration ids now reach $up_max and collide with your fork's migration $id $name. Renumbering is unsafe; decide by hand (see README, Caveats)"
     fi
   done < <(comm -13 <(migration_entries "$MB" | sort) <(migration_entries "$ORIG" | sort))
 
   RR_BEFORE="$(ls -1 .git/rr-cache 2>/dev/null | sort)"
   REBASED=0
+  STAGE="rebase"
   if git merge-base --is-ancestor "$UP" "$ORIG"; then
     log "branch already contains $UP_REF; no rebase needed"
   else
     log "rebasing $(git rev-list --count "$MB..$ORIG") fork commits onto $UP_REF ($(git rev-list --count "$MB..$UP") new upstream commits)"
     REBASED=1
     git rebase "$UP_REF"
-    local used_claude=0 unresolved
+    local used_resolver=0 unresolved
     while rebase_in_progress; do
       unresolved="$(git diff --name-only --diff-filter=U)"
-      if [ -z "$unresolved" ] && [ "$used_claude" = 0 ]; then
+      if [ -z "$unresolved" ] && [ "$used_resolver" = 0 ]; then
         log "conflicts resolved by rerere; continuing"
         git add -u && git rebase --continue && continue
       fi
-      [ "$used_claude" = 1 ] && break
+      [ "$used_resolver" = 1 ] && break
       log "conflicts in: $(echo "$unresolved" | tr '\n' ' ')"
-      used_claude=1
-      run_claude_resolver
+      used_resolver=1
+      run_resolver
     done
-    if rebase_in_progress; then restore_branch; fail "rebase conflicts could not be resolved; the installed version is unchanged"; fi
+    if rebase_in_progress; then
+      restore_branch
+      RUN_RESULT=conflict_unresolved
+      fail "$(resolver_label) could not resolve the rebase conflicts in $(echo "$unresolved" | wc -l | tr -d ' ') file(s)"
+    fi
     git merge-base --is-ancestor "$UP" HEAD || { restore_branch; fail "rebase result does not contain $UP_REF"; }
     [ -z "$(git status --porcelain --untracked-files=no)" ] || { restore_branch; fail "rebase left uncommitted changes"; }
     local dup
     dup="$(migration_entries HEAD | awk '{print $1}' | sort | uniq -d)"
-    [ -z "$dup" ] || { restore_branch; fail "duplicate migration ids after rebase: $dup"; }
+    [ -z "$dup" ] || { restore_branch; RUN_RESULT=migration_collision; fail "duplicate migration ids after rebase: $dup"; }
   fi
   HEAD_SHA="$(git rev-parse HEAD)"
   log "result HEAD=$HEAD_SHA ($(git rev-list --count "$UP..HEAD") commits on top of upstream)"
 
   if [ "$HEAD_SHA" = "$(cat "$STATE/last-built-sha" 2>/dev/null)" ] && [ "$FORCE" = 0 ]; then
     log "nothing changed since the last build ($HEAD_SHA); done"
+    RUN_RESULT=up_to_date
+    RUN_REASON="nothing changed since the last build"
+    RUN_VERSION="$(cat "$STATE/last-version" 2>/dev/null)"
     exit 0
   fi
 
   # ------------------------------------------------------------ tests
+  STAGE="tests"
   if ! run_gate; then
     if [ "$REBASED" = 1 ]; then
       log "tests failed after rebase; restoring $FORK_BRANCH to $ORIG"
       restore_branch
       vp i >/dev/null 2>&1
     fi
-    fail "tests failed; the installed version is unchanged"
+    fail "$(cat "$STATE/gate-reason" 2>/dev/null || echo "the tests failed")"
   fi
   log "tests green"
+  STAGE="push"
 
   # ------------------------------------------------------------ push
   if [ "$HEAD_SHA" != "$ORIG" ]; then
@@ -136,6 +154,7 @@ cmd_update() {
   fi
 
   # ------------------------------------------------------------ version
+  STAGE="build"
   local desktop_version base seq version last_version installed
   desktop_version="$(node -p 'require("./apps/desktop/package.json").version')" || fail "cannot read the desktop version"
   base="$(echo "$desktop_version" | sed -E 's/[-+].*//' | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')"
@@ -189,6 +208,7 @@ updaterCacheDirName: $UPDATER_CACHE_DIR_NAME
 EOF
 
   apply_icon "$built_app"
+  apply_diy_env "$built_app" || fail "writing the kit's keys into Info.plist failed"
 
   log "signing"
   sign_app "$built_app" || fail "signing failed"
@@ -217,6 +237,7 @@ EOF
   echo "$HEAD_SHA" >"$STATE/last-built-sha"
   echo "$version" >"$STATE/last-version"
   echo "$seq" >"$STATE/build-seq"
+  RUN_VERSION="$version"
 
   # ------------------------------------------------------------ prune
   local old
@@ -228,6 +249,8 @@ EOF
   done
 
   log "== done: $version"
+  RUN_RESULT=ok
+  RUN_REASON="built $version"
   if [ -d "$INSTALLED_APP" ]; then
     notify "build ready" "$version is in the local feed. Use Check for updates in $INSTALLED_NAME." && log "notification sent"
   else
@@ -237,9 +260,44 @@ EOF
 }
 
 update_cleanup() {
-  [ -n "${CLAUDE_PID:-}" ] && kill -- "-$CLAUDE_PID" 2>/dev/null
+  local rc=$?
+  [ -n "${RESOLVER_PID:-}" ] && kill -- "-$RESOLVER_PID" 2>/dev/null
+  restore_push_urls
   revert_side_patch
+  if [ -z "$RUN_RESULT" ]; then
+    RUN_RESULT=error
+    RUN_REASON="the run stopped unexpectedly during the $STAGE step (exit $rc)"
+  fi
+  write_run_record "$RUN_RESULT" "$(iso_now)"
   rm -f "$LOCK"
+}
+
+# state/last-run: what the last run did, for status --json. key=value lines, read with sed, never sourced.
+write_run_record() {
+  local result="$1" ended="$2"
+  {
+    echo "pid=$$"
+    echo "started_at=$RUN_STARTED"
+    echo "ended_at=$ended"
+    echo "result=$result"
+    echo "reason=$(printf %s "$RUN_REASON" | tr '\n\t' '  ')"
+    echo "version=$RUN_VERSION"
+    echo "log=$LOG"
+  } >"$STATE/last-run.tmp" && mv -f "$STATE/last-run.tmp" "$STATE/last-run"
+}
+
+# Both kinds of builds get these; the app reads T3CODE_DIY_BIN to find the kit (Settings, About),
+# and a side-by-side app shows its own name instead of "T3 Code (Nightly)". Must run before signing.
+apply_diy_env() {
+  local p="$1/Contents/Info.plist" bin="$KIT/bin/t3code-diy"
+  [ -x "$bin" ] || bin="$KIT_SRC/bin/t3code-diy"
+  plutil -extract LSEnvironment raw "$p" >/dev/null 2>&1 || plutil -insert LSEnvironment -dictionary "$p" || return 1
+  plutil -replace LSEnvironment.T3CODE_DIY_BIN -string "$bin" "$p" || return 1
+  if is_side_by_side; then
+    plutil -replace LSEnvironment.T3CODE_DESKTOP_DISPLAY_NAME -string "$SIDE_APP_NAME" "$p" || return 1
+  fi
+  plutil -lint -s "$p" || return 1
+  log "Info.plist: T3CODE_DIY_BIN=$bin$(is_side_by_side && echo ", T3CODE_DESKTOP_DISPLAY_NAME=$SIDE_APP_NAME")"
 }
 
 # ---------------------------------------------------------------- side-by-side
@@ -255,7 +313,7 @@ apply_side_patch() {
     return 0
   fi
   git -C "$REPO" apply --check "$(side_patch)" \
-    || fail "the side-by-side patch no longer applies to $SIDE_PATCH_FILE (upstream changed it). Nothing was built; the installed version is unchanged. Update $(side_patch)"
+    || fail "the side-by-side patch no longer applies to $SIDE_PATCH_FILE (upstream changed it), so nothing was built. Update $(side_patch)"
   git -C "$REPO" apply "$(side_patch)" || fail "applying the side-by-side patch failed"
   PATCHED=1
   [ "$(git -C "$REPO" diff --numstat)" = "$(printf '3\t0\t%s' "$SIDE_PATCH_FILE")" ] \
@@ -348,9 +406,20 @@ apply_icon() {
   rm -rf "$tmp"
 }
 
+# fail <reason>: RUN_RESULT, when the caller set one, names the failure; otherwise the step does.
 fail() {
-  log "FAILED: $*"
-  notify "update failed" "$* (log: $LOG)" && log "notification sent"
+  if [ -z "$RUN_RESULT" ]; then
+    case "$STAGE" in
+      rebase) RUN_RESULT=rebase_failed ;;
+      tests) RUN_RESULT=tests_failed ;;
+      push) RUN_RESULT=push_failed ;;
+      build) RUN_RESULT=build_failed ;;
+      *) RUN_RESULT=error ;;
+    esac
+  fi
+  RUN_REASON="$*"
+  log "FAILED ($RUN_RESULT): $*"
+  notify "update failed" "$*. The installed app is unchanged. (log: $LOG)" && log "notification sent"
   exit 1
 }
 
@@ -369,16 +438,20 @@ restore_branch() {
 # Files of one FORK_TEST_GROUPS entry (an extended regex over `git ls-files`).
 group_files() { git ls-files | grep -E "$1" | tr '\n' ' '; }
 
+# Says in one line why the gate failed (for the run record) and fails.
+gate_fail() { echo "$1" >"$STATE/gate-reason"; return 1; }
+
 run_gate() {
+  rm -f "$STATE/gate-reason"
   log "vp i"
-  vp i || return 1
+  vp i || gate_fail "installing dependencies (vp i) failed" || return 1
   local group files
   for group in "${FORK_TEST_GROUPS[@]+"${FORK_TEST_GROUPS[@]}"}"; do
     files="$(group_files "$group")"
-    [ -n "$files" ] || { log "test group '$group' matches no files"; return 1; }
+    [ -n "$files" ] || { log "test group '$group' matches no files"; gate_fail "the test group '$group' matches no files"; return 1; }
     log "fork tests ($group): $files"
     # shellcheck disable=SC2086
-    vp test run $files || return 1
+    vp test run $files || gate_fail "your fork's tests failed ($(echo "$files" | wc -w | tr -d ' ') file(s) in '$group')" || return 1
   done
   [ "$RUN_CHECK_CHANGED" = 1 ] || return 0
   log "vp run check:changed $UP_REF"
@@ -389,7 +462,7 @@ run_gate() {
   local bad
   bad="$(sed $'s/\x1b\\[[0-9;]*m//g' "$out" | sed -n '/check:changed summary/,$p' \
     | sed -nE 's/^ *(FAIL|TIMEOUT) +(.+) [0-9.]+s$/\1 \2/p' | grep -vE '^FAIL test( |$)')"
-  if [ -n "$bad" ]; then log "check:changed failed: $bad"; return 1; fi
+  if [ -n "$bad" ]; then log "check:changed failed: $bad"; gate_fail "check:changed failed: $(echo "$bad" | sed 's/^FAIL //' | paste -sd, - | sed 's/,/, /g')"; return 1; fi
   failures_are_preexisting "$out"
 }
 
@@ -407,7 +480,7 @@ failed_tests() {
 failures_are_preexisting() {
   local out="$1" lines files f path up_lines missing
   lines="$(failed_tests "$out")"
-  [ -n "$lines" ] || { log "check:changed failed without test failures I can parse"; return 1; }
+  [ -n "$lines" ] || { log "check:changed failed without test failures I can parse"; gate_fail "check:changed failed"; return 1; }
   if [ ! -d "$UPSTREAM_WT" ]; then
     git worktree add -q --detach "$UPSTREAM_WT" "$UP" || return 1
   fi
@@ -417,7 +490,7 @@ failures_are_preexisting() {
   : >"$STATE/upstream-test.out"
   while IFS= read -r f; do
     path="$(git -C "$UPSTREAM_WT" ls-files | grep -E "(^|/)${f//./\\.}$" | tr '\n' ' ')"
-    [ -n "$path" ] || { log "failing test $f does not exist upstream"; return 1; }
+    [ -n "$path" ] || { log "failing test $f does not exist upstream"; gate_fail "a test failed: $f"; return 1; }
     # shellcheck disable=SC2086
     (cd "$UPSTREAM_WT" && vp test run $path) >>"$STATE/upstream-test.out" 2>&1
   done <<<"$files"
@@ -425,6 +498,7 @@ failures_are_preexisting() {
   missing="$(comm -23 <(echo "$lines") <(echo "$up_lines"))"
   if [ -n "$missing" ]; then
     log "failures not reproduced on plain upstream:"; echo "$missing" | sed 's/^/  /'
+    gate_fail "$(echo "$missing" | wc -l | tr -d ' ') test(s) failed that pass on plain upstream, e.g. $(echo "$missing" | head -1)"
     return 1
   fi
   log "every check:changed test failure also fails on plain upstream (pre-existing):"
@@ -473,17 +547,118 @@ EOF
   printf '\nWhen you finish, print one line starting with RESULT: success, or RESULT: failed <reason>.\n'
 }
 
-run_claude_resolver() {
-  local prompt_file="$STATE/claude-prompt.txt" out="$STATE/claude-output.txt"
+resolver_label() {
+  case "$RESOLVER_PROVIDER" in codex) printf 'Codex' ;; *) printf 'Claude Code' ;; esac
+  [ -n "$RESOLVER_MODEL" ] && printf ' (%s)' "$RESOLVER_MODEL"
+  return 0
+}
+
+# ---------------------------------------------------------------- no push while the agent runs
+# The resolver must never push; the script pushes itself, after the tests. Codex has no per-command
+# deny list, so this works for any provider: every remote's push URL points nowhere in .git/config
+# for the agent's run. The originals are saved first and put back by restore_push_urls, which also
+# runs from the EXIT trap and at the start of the next run (in case this one was SIGKILLed).
+push_urls_saved_file() { echo "$STATE/push-urls.saved"; }
+DEAD_PUSH_URL="/dev/null/t3code-diy-push-disabled"
+
+# Saved as "name<TAB>url<TAB>pushurl" lines (pushurl empty when the remote has none).
+disable_push_urls() {
+  local saved r u p
+  saved="$(push_urls_saved_file)"
+  [ -f "$saved" ] && restore_push_urls
+  : >"$saved.tmp"
+  for r in $(git -C "$REPO" remote); do
+    u="$(git -C "$REPO" config --get "remote.$r.url")"
+    if p="$(git -C "$REPO" config --get-all "remote.$r.pushurl")"; then
+      printf '%s\n' "$p" | while IFS= read -r one; do printf '%s\t%s\t%s\n' "$r" "$u" "$one"; done >>"$saved.tmp"
+    else
+      printf '%s\t%s\t\n' "$r" "$u" >>"$saved.tmp"
+    fi
+  done
+  mv -f "$saved.tmp" "$saved"
+  for r in $(git -C "$REPO" remote); do
+    git -C "$REPO" config --replace-all "remote.$r.pushurl" "$DEAD_PUSH_URL" || return 1
+  done
+  log "push disabled for the resolver (push URLs of: $(git -C "$REPO" remote | tr '\n' ' '))"
+}
+
+# Puts every remote back as it was saved: its URL and push URLs. A remote the agent added goes.
+restore_push_urls() {
+  local saved r u p
+  saved="$(push_urls_saved_file)"
+  [ -f "$saved" ] || return 0
+  for r in $(git -C "$REPO" remote); do
+    if cut -f1 "$saved" | grep -qxF "$r"; then
+      git -C "$REPO" config --unset-all "remote.$r.pushurl" 2>/dev/null
+    else
+      git -C "$REPO" remote remove "$r" && log "removed remote $r, added while the resolver ran"
+    fi
+  done
+  while IFS="$(printf '\t')" read -r r u p; do
+    [ -n "$r" ] || continue
+    git -C "$REPO" remote get-url "$r" >/dev/null 2>&1 || git -C "$REPO" remote add "$r" "$u"
+    [ "$(git -C "$REPO" config --get "remote.$r.url")" = "$u" ] || git -C "$REPO" config "remote.$r.url" "$u"
+    [ -n "$p" ] && git -C "$REPO" config --add "remote.$r.pushurl" "$p"
+  done <"$saved"
+  rm -f "$saved"
+  log "push URLs restored"
+}
+
+# The fork's branch on GitHub, so a push that got past the lockout is caught before anything else.
+remote_branch_sha() {
+  git -C "$REPO" ls-remote origin "refs/heads/$FORK_BRANCH" 2>/dev/null | awk '{print $1}'
+}
+
+run_resolver() {
+  local prompt_file="$STATE/resolver-prompt.txt" out="$STATE/resolver-output.txt" problem before after
   resolver_prompt >"$prompt_file"
-  log "starting Claude Code ($CLAUDE_MODEL) to resolve conflicts (prompt: $prompt_file)"
-  # Any push the agent might attempt goes to a dead URL. The script pushes itself, after the tests.
+  problem="$(resolver_problem "$RESOLVER_PROVIDER")"
+  if [ -n "$problem" ]; then
+    log "not starting the conflict resolver: $problem"
+    RUN_RESULT=conflict_unresolved
+    restore_branch
+    fail "the rebase conflicts and $problem"
+  fi
+  before="$(remote_branch_sha)"
+  disable_push_urls || { restore_push_urls; fail "could not disable pushing for the resolver"; }
+  log "starting $(resolver_label) to resolve conflicts (prompt: $prompt_file)"
   set -m
-  GIT_CONFIG_COUNT=2 \
-    GIT_CONFIG_KEY_0=remote.origin.pushurl GIT_CONFIG_VALUE_0=/dev/null/push-disabled \
-    GIT_CONFIG_KEY_1=remote.upstream.pushurl GIT_CONFIG_VALUE_1=/dev/null/push-disabled \
-    claude -p "$(cat "$prompt_file")" \
-    --model "$CLAUDE_MODEL" \
+  (
+    # Belt and braces next to the push URLs: no SSH, no credential prompts.
+    export GIT_SSH_COMMAND=/usr/bin/false GIT_ASKPASS=/usr/bin/false SSH_ASKPASS=/usr/bin/false GIT_TERMINAL_PROMPT=0
+    "resolver_cmd_$RESOLVER_PROVIDER" "$prompt_file"
+  ) >"$out" 2>&1 &
+  RESOLVER_PID=$!
+  set +m
+  local waited=0 limit=$((RESOLVER_TIMEOUT_MIN * 60))
+  while kill -0 "$RESOLVER_PID" 2>/dev/null; do
+    sleep 15; waited=$((waited + 15))
+    if [ "$waited" -ge "$limit" ]; then
+      log "$(resolver_label) timed out after ${limit}s; stopping it"
+      kill -- "-$RESOLVER_PID" 2>/dev/null
+      sleep 5; kill -9 -- "-$RESOLVER_PID" 2>/dev/null
+      break
+    fi
+  done
+  wait "$RESOLVER_PID" 2>/dev/null
+  local rc=$?
+  RESOLVER_PID=""
+  restore_push_urls
+  log "$(resolver_label) exited ($rc). Output:"
+  sed "s/^/  $RESOLVER_PROVIDER| /" "$out"
+  after="$(remote_branch_sha)"
+  if [ -n "$before" ] && [ -n "$after" ] && [ "$before" != "$after" ]; then
+    restore_branch
+    fail "origin/$FORK_BRANCH moved from $before to $after while the resolver ran; check your fork by hand"
+  fi
+}
+
+# claude -p with an allowlist: edits, git add/commit/rebase --continue and the test commands only.
+resolver_cmd_claude() {
+  local model=()
+  [ -n "$RESOLVER_MODEL" ] && model=(--model "$RESOLVER_MODEL")
+  claude -p "$(cat "$1")" \
+    "${model[@]+"${model[@]}"}" \
     --strict-mcp-config --no-session-persistence --setting-sources project \
     --permission-mode acceptEdits \
     --allowedTools "Read" "Edit" "Write" "Glob" "Grep" \
@@ -495,23 +670,18 @@ run_claude_resolver() {
     "Bash(vp run typecheck:*)" "Bash(vp run fmt:*)" "Bash(vp fmt:*)" "Bash(vp lint:*)" \
     "Bash(ls:*)" "Bash(cat:*)" "Bash(head:*)" "Bash(tail:*)" "Bash(wc:*)" "Bash(rg:*)" "Bash(grep:*)" \
     --disallowedTools "Bash(git push:*)" "Bash(git reset:*)" "Bash(git rebase --abort:*)" \
-    "Bash(git rebase --skip:*)" "Bash(git checkout -B:*)" "WebFetch" "WebSearch" \
-    </dev/null >"$out" 2>&1 &
-  CLAUDE_PID=$!
-  set +m
-  local waited=0 limit=$((CLAUDE_TIMEOUT_MIN * 60))
-  while kill -0 "$CLAUDE_PID" 2>/dev/null; do
-    sleep 15; waited=$((waited + 15))
-    if [ "$waited" -ge "$limit" ]; then
-      log "Claude Code timed out after ${limit}s; stopping it"
-      kill -- "-$CLAUDE_PID" 2>/dev/null
-      sleep 5; kill -9 -- "-$CLAUDE_PID" 2>/dev/null
-      break
-    fi
-  done
-  wait "$CLAUDE_PID" 2>/dev/null
-  local rc=$?
-  CLAUDE_PID=""
-  log "Claude Code exited ($rc). Output:"
-  sed 's/^/  claude| /' "$out"
+    "Bash(git rebase --skip:*)" "Bash(git checkout -B:*)" "Bash(git config:*)" "Bash(git remote:*)" \
+    "WebFetch" "WebSearch" \
+    </dev/null
+}
+
+# codex exec has no per-command allowlist. It runs without its sandbox because the rebase writes to
+# .git and vp i writes outside the repo, both of which workspace-write refuses; the push lockout
+# above is what keeps it from pushing. The prompt comes in on stdin.
+resolver_cmd_codex() {
+  local model=()
+  [ -n "$RESOLVER_MODEL" ] && model=(-m "$RESOLVER_MODEL")
+  codex exec -C "$REPO" "${model[@]+"${model[@]}"}" \
+    --sandbox danger-full-access --ephemeral --color never \
+    -o "$STATE/resolver-last-message.txt" - <"$1"
 }

@@ -13,7 +13,7 @@ Every day (and when you log in) a launchd job on your Mac:
 
 1. fetches upstream `main` and your fork's branch, and rebases your branch onto upstream
    (with `git rerere` on, so a conflict you resolved once stays resolved)
-2. if the rebase conflicts, runs Claude Code headless to resolve it
+2. if the rebase conflicts, runs Claude Code or Codex headless to resolve it
 3. runs your fork's tests plus upstream's `vp run check:changed`
 4. pushes the rebased branch back to your fork
 5. builds the macOS app, signs it with a self-signed certificate that lives only on your Mac,
@@ -28,7 +28,7 @@ the tests pass, so if the build or signing fails after that, the rebased branch 
 fork but nothing is published. Either way the app you have installed stays as it is, and you get a
 macOS notification with the path to the log.
 
-Everything runs on your machine with your Claude login and your signing key. There's no CI, no
+Everything runs on your machine with your Claude (or Codex) login and your signing key. There's no CI, no
 secrets in GitHub, and no binaries to download: you build your own.
 
 ## Requirements
@@ -37,7 +37,8 @@ secrets in GitHub, and no binaries to download: you build your own.
 - Xcode Command Line Tools (`xcode-select --install`)
 - Node and [Vite+](https://viteplus.dev) (`vp`), which T3 Code uses for installs and tests
 - Rust from [rustup.rs](https://rustup.rs) plus `rustup target add aarch64-apple-darwin`
-- [Claude Code](https://docs.claude.com/en/docs/claude-code), logged in (`claude auth login`)
+- [Claude Code](https://docs.claude.com/en/docs/claude-code), logged in (`claude auth login`), or
+  the [Codex CLI](https://developers.openai.com/codex/cli), logged in (`codex login`), for conflicts
 - A fork of `pingdotgg/t3code` with a branch carrying your changes
 - About 15 GB of free disk (repo, dependencies, a pristine upstream checkout for the test gate,
   the last 3 builds)
@@ -52,7 +53,7 @@ cd t3code-diy
 ./bin/t3code-diy install
 ```
 
-It asks for your fork URL, branch, feed port, schedule and Claude model. Or pass everything:
+It asks for your fork URL, branch, feed port, schedule and conflict resolver. Or pass everything:
 
 ```sh
 ./bin/t3code-diy install --yes \
@@ -84,9 +85,90 @@ Enter your password and pick **Always Allow**. Updates keep the same signature, 
 again. After that the app updates itself; you only run `install-app` again if you change one of the
 `SIDE_*` settings. `uninstall-app` removes it (its data stays).
 
-Other commands: `update` runs the job by hand (`--force` builds even if nothing changed,
-`--no-push` skips the push), `uninstall` removes the launchd jobs (`--purge` also deletes
-`~/.t3code-diy`).
+Other commands: `update` runs the job by hand in your terminal (`--force` builds even if nothing
+changed, `--no-push` skips the push), `run` starts the launchd job now and returns right away,
+`log [--tail N]` prints the last run's log, `config get/set` reads or changes one setting (below),
+`uninstall` removes the launchd jobs (`--purge` also deletes `~/.t3code-diy`).
+
+## Conflict resolver
+
+When `git rerere` can't replay a resolution, the job hands the stopped rebase to an agent:
+Claude Code (`claude -p`) by default, or Codex (`codex exec`). Pick one, and its model:
+
+```sh
+~/.t3code-diy/kit/bin/t3code-diy config set RESOLVER_PROVIDER codex RESOLVER_MODEL gpt-5.5
+~/.t3code-diy/kit/bin/t3code-diy config set RESOLVER_PROVIDER claude RESOLVER_MODEL opus
+~/.t3code-diy/kit/bin/t3code-diy config set RESOLVER_MODEL ''   # the CLI's own default
+```
+
+`set` checks every value before it writes anything, and won't switch to a CLI that isn't installed
+and logged in. Model names are what T3 Code shows (`opus`, `claude-opus-4-6[1m]`, `gpt-5.5`); the
+agent gets `RESOLVER_TIMEOUT_MIN` minutes (default 90). Configs from before this used
+`CLAUDE_MODEL`; that value carries over as `RESOLVER_MODEL` and the next write renames it.
+`install --resolver codex --model gpt-5.5` does the same at install time.
+
+`config set` also takes `RESOLVER_TIMEOUT_MIN`, `PUSH` and `RUN_CHECK_CHANGED`. `config get KEY`
+reads any plain setting. Schedule, port, labels and the `SIDE_*` values still go through `install`,
+because launchd or a rebuild has to pick them up.
+
+## In the app
+
+Each build puts `T3CODE_DIY_BIN` (the path to `~/.t3code-diy/kit/bin/t3code-diy`) in the app's
+`Info.plist`, next to the side-by-side keys. A fork that knows about it shows a Custom build card
+in Settings, About: the last update and its result, the log, an Update now button and the
+conflict resolver picker. It talks to the kit only through the commands below, so the kit and the
+app can be updated separately. Without the key (anybody else's fork, or the official app) nothing
+changes. Side-by-side builds also get `T3CODE_DESKTOP_DISPLAY_NAME="$SIDE_APP_NAME"`, which a fork
+that reads it uses for the window title and the About panel.
+
+## Machine-readable status
+
+`t3code-diy status --json` prints one JSON object and never asks anything. It stays off the
+network and takes a fraction of a second, so it's fine to poll. `schema` goes up only when a field
+changes meaning or goes away; new fields can show up any time, so ignore the ones you don't know.
+
+```json
+{
+  "schema": 1,
+  "kit": { "bin": "/Users/you/.t3code-diy/kit/bin/t3code-diy", "home": "/Users/you/.t3code-diy" },
+  "mode": "side-by-side",
+  "app": {
+    "name": "T3 Code Custom",
+    "path": "/Applications/T3 Code Custom.app",
+    "installedVersion": "0.1.8-nightly.20261105.900004",
+    "forkBuild": true,
+    "latestBuild": "0.1.8-nightly.20261105.900005"
+  },
+  "fork": { "url": "git@github.com:you/t3code.git", "branch": "my-changes" },
+  "upstream": { "url": "https://github.com/pingdotgg/t3code.git", "branch": "main" },
+  "resolver": { "provider": "claude", "model": "opus", "timeoutMinutes": 90 },
+  "schedule": { "loaded": true, "hour": 5, "minute": 0, "atLogin": true, "nextRun": "2026-11-05T05:00:00-06:00" },
+  "running": false,
+  "lastRun": {
+    "result": "ok",
+    "reason": "built 0.1.8-nightly.20261105.900005",
+    "startedAt": "2026-11-04T18:25:37-06:00",
+    "endedAt": "2026-11-04T18:39:04-06:00",
+    "version": "0.1.8-nightly.20261105.900005",
+    "log": "/Users/you/.t3code-diy/logs/update-20261104-182537.log"
+  }
+}
+```
+
+- `app.installedVersion` is `null` when the app isn't in `/Applications`; `latestBuild` is the newest
+  build in the feed, which the app picks up through its own updater.
+- `schedule.nextRun` is the next daily run (local time, ISO 8601), `null` when the job isn't loaded.
+  Runs at login aren't predictable, so they aren't in it.
+- `running` is true from the moment launchd starts the job until it exits.
+- `lastRun` is `null` before the first run. `result` is one of `ok` (a new build is in the feed),
+  `up_to_date` (nothing changed), `running`, `conflict_unresolved`, `tests_failed`,
+  `migration_collision`, `rebase_failed`, `push_failed`, `build_failed`, `interrupted` (the run
+  died without finishing: killed, or the Mac shut down) and `error` (anything else). `reason` is one
+  plain sentence. On every result but `ok` the installed app is exactly as it was. `endedAt`
+  is `null` while it runs.
+
+Exit codes: `run`, `config` and `log` exit 0 on success, 1 when something is wrong (the message is
+on stderr) and 2 for a bad command line.
 
 ## Modes
 
@@ -212,8 +294,9 @@ Side-by-side:
 - **Terminals inside your app** see `T3CODE_HOME=~/.t3-custom`, so a `t3` command run there talks
   to your app. Don't use "Install t3 command" in your app unless you want `t3` everywhere to mean
   your build.
-- The About panel still says "T3 Code (Nightly)" (the name inside the app's code); the app name,
-  menu and Dock say yours.
+- The window title and the About panel say "T3 Code (Nightly)" (the name inside the app's code)
+  unless your fork reads `T3CODE_DESKTOP_DISPLAY_NAME`, which the kit sets to your app's name. The
+  app name, menu and Dock say yours either way.
 - **Icon caching.** Finder and the Dock cache icons, so after an update that changes the icon the
   old one can stick around. Quit the app, then run `killall Dock Finder`; if it's still the old
   one, `touch "/Applications/T3 Code Custom.app"` first. The small permission prompts the app
@@ -237,9 +320,15 @@ Both modes:
   official app refuses a database your fork migrated. Rollback restores your pre-switch database
   for that reason, but anything you did in the fork build stays in the fork-era copy.
 - **The conflict agent runs unattended.** Claude Code gets permission to edit files, run git
-  add/commit/rebase --continue and the test commands in the managed repo, nothing else. It can't
-  push: `git push` is denied in its permissions and its git sees a dead push URL. The script itself
-  pushes, and only after the tests pass. Read the logs now and then.
+  add/commit/rebase --continue and the test commands in the managed repo, nothing else (`git push`,
+  `git config` and `git remote` are denied). Codex has no per-command allowlist, so it runs with its
+  sandbox off (the rebase writes to `.git` and `vp i` writes outside the repo, which its sandbox
+  refuses). Neither can push, and that part doesn't depend on the agent: for its run every remote's
+  push URL in `.git/config` points nowhere and SSH and credential prompts are off. The real URLs
+  are saved first and put back afterwards, even when the run fails or is killed (then the next run
+  puts them back), and a remote the agent added is removed. After the agent exits the job checks
+  that your branch on GitHub didn't move. The script itself pushes, and only after the tests pass.
+  Read the logs now and then.
 - **Force-push.** The daily job rewrites your branch (it's a rebase) and pushes it with
   `--force-with-lease`. If you pushed something in between, the push fails and nothing is built.
   Don't use the branch for anything that can't handle being rebased. For pushes over SSH the job
