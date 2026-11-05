@@ -186,6 +186,8 @@ Done.
 - Command: $KIT/bin/t3code-diy (add $KIT/bin to your PATH if you like)
 $(if [ "$no_load" = 0 ]; then
   echo "- Daily update at $SCHEDULE_HOUR:$(printf %02d "$SCHEDULE_MINUTE")$([ "$RUN_AT_LOGIN" = 1 ] && echo " and at login; the first one is running now")"
+elif launchctl print "gui/$(id -u)/$UPDATE_LABEL" >/dev/null 2>&1; then
+  echo "- launchd jobs not reloaded (--no-load); the loaded $UPDATE_LABEL keeps its schedule"
 else
   echo "- Nothing is scheduled (--no-load). Run \"t3code-diy update\" by hand, or install again without --no-load."
 fi)
