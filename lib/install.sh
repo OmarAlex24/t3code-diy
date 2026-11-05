@@ -184,7 +184,11 @@ cmd_install() {
 
 Done.
 - Command: $KIT/bin/t3code-diy (add $KIT/bin to your PATH if you like)
-- Daily update at $SCHEDULE_HOUR:$(printf %02d "$SCHEDULE_MINUTE")$([ "$RUN_AT_LOGIN" = 1 ] && echo " and at login")$([ "$no_load" = 0 ] && [ "$RUN_AT_LOGIN" = 1 ] && echo "; the first one is running now")
+$(if [ "$no_load" = 0 ]; then
+  echo "- Daily update at $SCHEDULE_HOUR:$(printf %02d "$SCHEDULE_MINUTE")$([ "$RUN_AT_LOGIN" = 1 ] && echo " and at login; the first one is running now")"
+else
+  echo "- Nothing is scheduled (--no-load). Run \"t3code-diy update\" by hand, or install again without --no-load."
+fi)
 - Logs: $LOGS (t3code-diy status shows the latest)
 - Push: $([ "$PUSH" = 1 ] && echo "on, the rebased branch goes back to $FORK_URL after the tests pass" || echo "off, nothing is pushed")
 $(if is_side_by_side; then
