@@ -50,6 +50,9 @@ cmd_update() {
   trap update_cleanup EXIT
 
   export GIT_EDITOR=true GIT_SEQUENCE_EDITOR=true GIT_TERMINAL_PROMPT=0
+  # Browser tests need Playwright's Chromium. The kit keeps its own copy so cache cleaners can't
+  # take it away between runs; run_gate downloads it when it's missing.
+  export PLAYWRIGHT_BROWSERS_PATH="$DIY_HOME/playwright-browsers"
   cd "$REPO" || fail "repo missing: $REPO"
 
   log "== t3code-diy update start (mode=$MODE force=$FORCE no_push=$NO_PUSH reuse_dist=$REUSE_DIST)"
@@ -445,6 +448,13 @@ run_gate() {
   rm -f "$STATE/gate-reason"
   log "vp i"
   vp i || gate_fail "installing dependencies (vp i) failed" || return 1
+  # Same step as upstream's CI. Quick when the right version is already there.
+  local pw="$REPO/apps/web/node_modules/playwright/cli.js"
+  if [ -f "$pw" ]; then
+    log "playwright: chromium headless shell in $PLAYWRIGHT_BROWSERS_PATH"
+    node "$pw" install --only-shell chromium \
+      || gate_fail "downloading Playwright's Chromium for the browser tests failed" || return 1
+  fi
   local group files
   for group in "${FORK_TEST_GROUPS[@]+"${FORK_TEST_GROUPS[@]}"}"; do
     files="$(group_files "$group")"

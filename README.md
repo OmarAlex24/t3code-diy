@@ -281,6 +281,9 @@ Configs from before modes existed stay in replace mode.
 - The test gate runs your `FORK_TEST_GROUPS` (must pass) and `vp run check:changed upstream/main`.
   A check:changed test failure only counts as OK if the same test also fails on a pristine upstream
   checkout (`~/.t3code-diy/upstream-check`). Anything else blocks the build.
+- Browser tests (`*.browser.test.tsx`) need Playwright's headless Chromium. The gate downloads the
+  version the repo pins into `~/.t3code-diy/playwright-browsers` (once, about 100 MB), the same
+  step upstream's CI runs.
 - One run at a time (lock file). Logs: `~/.t3code-diy/logs/update-*.log` (last 30 kept).
 - Daily time, port, model and the rest live in `~/.t3code-diy/config`. After editing schedule, port
   or labels, re-run `install` so the launchd jobs pick them up.
