@@ -100,6 +100,7 @@ server, so it runs at the same time as the official T3 Code:
 | T3 home | `~/.t3` | `~/.t3-custom` (`SIDE_T3_HOME`) |
 | Electron profile | `~/Library/Application Support/t3code-v2` | `.../t3code-custom` (`SIDE_USER_DATA_NAME`) |
 | server port | 3773 or the next free one | 3873 (`SIDE_PORT`) |
+| icon | upstream's Nightly icon | T3 Code Dev's blueprint (`ICON`) |
 | updates | GitHub releases | your local feed |
 
 Upstream's Beta and Nightly can't run together: they share the bundle id, the profile dir (and with
@@ -119,6 +120,15 @@ from a dev server. So the kit separates your build itself:
 
 If you change a `SIDE_*` value in the config, run `update --force`, quit the app, then
 `install-app`.
+
+**Icon.** So you can tell the two apps apart in the Dock, side-by-side builds get T3 Code Dev's
+blueprint icon (`assets/dev/blueprint-macos-1024.png` from the repo being built). Want your own?
+Pass `install --icon path/to/icon.png` with a 1024px PNG that's already shaped like a macOS icon
+(transparent margins, rounded square). Relative paths are inside the repo being built, so an
+icon you commit to your fork works too. `--icon ''` keeps the stock icon. It's the `ICON` line in
+the config; after changing it run `update --force` and update the app from inside it. If the
+file is missing at build time, the run logs it and builds with the stock icon instead of failing.
+Replace mode keeps the stock icon unless you pass `--icon`.
 
 **replace**. Your build takes the official app's place: same name, bundle id and data. Pick it with
 `install --mode replace`; then you use `switch` and `rollback` instead of `install-app` and
@@ -204,6 +214,11 @@ Side-by-side:
   your build.
 - The About panel still says "T3 Code (Nightly)" (the name inside the app's code); the app name,
   menu and Dock say yours.
+- **Icon caching.** Finder and the Dock cache icons, so after an update that changes the icon the
+  old one can stick around. Quit the app, then run `killall Dock Finder`; if it's still the old
+  one, `touch "/Applications/T3 Code Custom.app"` first. The small permission prompts the app
+  shows keep the stock icon: they read the copy packed inside `app.asar`, which the kit leaves
+  alone.
 
 Both modes:
 

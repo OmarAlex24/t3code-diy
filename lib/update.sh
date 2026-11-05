@@ -188,6 +188,8 @@ channel: nightly
 updaterCacheDirName: $UPDATER_CACHE_DIR_NAME
 EOF
 
+  apply_icon "$built_app"
+
   log "signing"
   sign_app "$built_app" || fail "signing failed"
   local dr
@@ -312,6 +314,38 @@ make_side_by_side() {
   plutil -lint -s "$p" "$c/Frameworks/$to Helper"*.app/Contents/Info.plist || return 1
   mv "$app" "$(dirname "$app")/$to.app" || return 1
   echo "$(dirname "$app")/$to.app"
+}
+
+# Replaces the bundle's icon.icns and icon.png with ICON (a 1024px PNG). Must run before signing.
+# A missing or unconvertible ICON only logs: the build goes on with the stock icon.
+apply_icon() {
+  local res="$1/Contents/Resources" src="$ICON" tmp size
+  [ -n "$src" ] || return 0
+  case "$src" in /*) ;; *) src="$REPO/$src" ;; esac
+  if [ ! -f "$src" ]; then
+    log "icon $src not found; keeping the stock icon"
+    return 0
+  fi
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/t3code-diy-icon.XXXXXX")" || { log "no temp dir for the icon; keeping the stock icon"; return 0; }
+  # Render everything first so a failure halfway leaves the stock icon intact.
+  if (
+    mkdir "$tmp/icon.iconset" || exit 1
+    for size in 16 32 128 256 512; do
+      sips -s format png -z "$size" "$size" "$src" --out "$tmp/icon.iconset/icon_${size}x${size}.png" >/dev/null || exit 1
+      sips -s format png -z $((size * 2)) $((size * 2)) "$src" --out "$tmp/icon.iconset/icon_${size}x${size}@2x.png" >/dev/null || exit 1
+    done
+    iconutil -c icns "$tmp/icon.iconset" -o "$tmp/icon.icns" || exit 1
+    sips -s format png -z 512 512 "$src" --out "$tmp/icon.png" >/dev/null || exit 1
+  ); then
+    if cp -f "$tmp/icon.icns" "$tmp/icon.png" "$res/"; then
+      log "icon: $src"
+    else
+      log "copying the icon into $res failed"
+    fi
+  else
+    log "could not turn $src into an icon; keeping the stock icon"
+  fi
+  rm -rf "$tmp"
 }
 
 fail() {

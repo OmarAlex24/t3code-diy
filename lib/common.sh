@@ -31,6 +31,10 @@ SIDE_USER_DATA_NAME="t3code-custom"
 SIDE_T3_HOME="$HOME/.t3-custom"
 # The official app scans up from 3773, so a fixed port above that keeps the two apart.
 SIDE_PORT=3873
+# App icon: a 1024px PNG baked into each build. Relative paths are inside the repo being built.
+# Empty keeps the stock icon. install sets the default below in side-by-side mode.
+ICON=""
+DEFAULT_SIDE_ICON="assets/dev/blueprint-macos-1024.png"
 USERDATA_DIR="$HOME/.t3/userdata"
 ELECTRON_DATA_DIRS=("$HOME/Library/Application Support/t3code-v2" "$HOME/Library/Application Support/t3code")
 UPDATER_CACHE_DIR_NAME="t3code-diy-updater"

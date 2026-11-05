@@ -22,6 +22,9 @@ Asks for anything you don't pass. With --yes it asks nothing and uses defaults.
   --mode MODE             side-by-side (default): your build is its own app next to the
                           official one. replace: it takes over the official app (switch/rollback)
   --apps-dir DIR          default: $APPS_DIR
+  --icon PNG              app icon, a 1024px PNG (relative paths are inside the repo being built).
+                          Side-by-side default: $DEFAULT_SIDE_ICON (T3 Code Dev's
+                          blueprint icon). Replace mode keeps the stock icon. --icon '' = stock
 
 Side-by-side mode (re-run install-app after changing these):
   --side-name NAME        app name, default: "$SIDE_APP_NAME"
@@ -43,10 +46,14 @@ EOF
 }
 
 cmd_install() {
-  local assume_yes=0 no_load=0 groups_set=0 edirs_set=0 tool_path_arg=""
+  local assume_yes=0 no_load=0 groups_set=0 edirs_set=0 tool_path_arg="" icon_set=0 had_icon=0 prev_mode
   local new_groups=() new_edirs=()
   # Re-running install keeps the existing answers as defaults.
-  [ -f "$DIY_CONFIG" ] && source_config
+  if [ -f "$DIY_CONFIG" ]; then
+    source_config
+    grep -q '^ICON=' "$DIY_CONFIG" && had_icon=1
+  fi
+  prev_mode="$MODE"
   while [ $# -gt 0 ]; do
     case "$1" in
       --fork-url) FORK_URL="$2"; shift ;;
@@ -70,6 +77,7 @@ cmd_install() {
       --side-port) SIDE_PORT="$2"; shift ;;
       --app-name) APP_NAME="$2"; shift ;;
       --apps-dir) APPS_DIR="$2"; shift ;;
+      --icon) ICON="$2"; icon_set=1; shift ;;
       --userdata-dir) USERDATA_DIR="$2"; shift ;;
       --electron-data-dir) new_edirs+=("$2"); edirs_set=1; shift ;;
       --tool-path) tool_path_arg="$2"; shift ;;
@@ -128,6 +136,16 @@ cmd_install() {
     [ "$SIDE_PORT" != "$FEED_PORT" ] || die "--side-port and --port must differ"
     [ "$SIDE_PORT" != 3773 ] || die "--side-port 3773 is where the official app starts; pick another"
   fi
+  # The icon follows the mode on a fresh config or a mode change, unless --icon says otherwise.
+  # Side-by-side gets the blueprint icon so the two apps look different; replace keeps the stock one.
+  if [ "$icon_set" = 0 ] && { [ "$had_icon" = 0 ] || [ "$prev_mode" != "$MODE" ]; }; then
+    if is_side_by_side; then
+      [ -n "$ICON" ] || ICON="$DEFAULT_SIDE_ICON"
+    elif [ "$ICON" = "$DEFAULT_SIDE_ICON" ]; then
+      ICON=""
+    fi
+  fi
+  ICON="${ICON/#\~/$HOME}"
 
   TOOL_PATH="${tool_path_arg:-$(build_tool_path)}"
   derive_paths
@@ -262,6 +280,9 @@ write_config() {
     echo "# side-by-side: your build is its own app next to the official one (install-app)."
     echo "# replace: it takes over the official app (switch/rollback). See README, Modes."
     echo "MODE=$(sq "$MODE")"
+    echo "# App icon: a 1024px PNG, baked into each build; after changing it run update --force."
+    echo "# Relative paths are inside the repo being built. Empty keeps the stock icon."
+    echo "ICON=$(sq "$ICON")"
     echo "# Side-by-side app. Baked into each build; after changing them run update --force,"
     echo "# then quit the app and run install-app."
     for v in SIDE_APP_NAME SIDE_BUNDLE_ID SIDE_USER_DATA_NAME SIDE_T3_HOME SIDE_PORT; do echo "$v=$(sq "${!v}")"; done
