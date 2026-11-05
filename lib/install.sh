@@ -7,8 +7,9 @@ Usage: t3code-diy install [options]
 
 Asks for anything you don't pass. With --yes it asks nothing and uses defaults.
 
-  --fork-url URL          your fork (required), e.g. git@github.com:you/t3code.git
-  --branch NAME           the branch with your changes (required)
+  --fork-url URL          the repo with the branch to build (required): your fork, e.g.
+                          git@github.com:you/t3code.git, or someone else's (then add --no-push)
+  --branch NAME           the branch to build (required)
   --upstream-url URL      default: $UPSTREAM_URL
   --upstream-branch NAME  default: $UPSTREAM_BRANCH
   --port N                local feed port, default: $FEED_PORT
@@ -19,7 +20,7 @@ Asks for anything you don't pass. With --yes it asks nothing and uses defaults.
   --label-prefix PREFIX   launchd label prefix, default: $LABEL_PREFIX
   --test-group REGEX      a group of your fork's tests (regex over git ls-files); repeatable
   --no-check-changed      skip upstream's "vp run check:changed" in the test gate
-  --no-push               never push the rebased branch back to your fork
+  --no-push               never push the rebased branch back (use it for a repo that isn't yours)
   --mode MODE             side-by-side (default): your build is its own app next to the
                           official one. replace: it takes over the official app (switch/rollback)
   --apps-dir DIR          default: $APPS_DIR
@@ -100,8 +101,11 @@ cmd_install() {
   check_prereqs || return 1
 
   if [ "$assume_yes" = 0 ]; then
-    ask FORK_URL "Your fork's git URL"
-    ask FORK_BRANCH "Branch with your changes"
+    ask FORK_URL "Git URL of the repo to build (your fork, or someone else's)"
+    ask FORK_BRANCH "Branch to build"
+    local push_answer
+    read -r -p "Push the rebased branch back to that repo after the tests pass? Answer n if it isn't yours [$([ "$PUSH" = 1 ] && echo Y/n || echo y/N)]: " push_answer
+    case "$push_answer" in [Yy]*) PUSH=1 ;; [Nn]*) PUSH=0 ;; esac
     ask UPSTREAM_URL "Upstream URL"
     ask UPSTREAM_BRANCH "Upstream branch"
     ask FEED_PORT "Local feed port"
@@ -110,7 +114,7 @@ cmd_install() {
     ask RESOLVER_PROVIDER "Conflict resolver (claude or codex)"
     ask RESOLVER_MODEL "Model for conflict resolution"
     if [ "${#FORK_TEST_GROUPS[@]}" = 0 ]; then
-      echo "Your fork's own tests run before every build. Give a regex over 'git ls-files' per group,"
+      echo "The branch's own tests run before every build. Give a regex over 'git ls-files' per group,"
       echo "e.g. '^apps/server/src/myfeature/.*\.test\.ts$'. Empty line to finish."
       local g
       while read -r -p "  test group: " g && [ -n "$g" ]; do FORK_TEST_GROUPS+=("$g"); done
@@ -182,6 +186,7 @@ Done.
 - Command: $KIT/bin/t3code-diy (add $KIT/bin to your PATH if you like)
 - Daily update at $SCHEDULE_HOUR:$(printf %02d "$SCHEDULE_MINUTE")$([ "$RUN_AT_LOGIN" = 1 ] && echo " and at login")$([ "$no_load" = 0 ] && [ "$RUN_AT_LOGIN" = 1 ] && echo "; the first one is running now")
 - Logs: $LOGS (t3code-diy status shows the latest)
+- Push: $([ "$PUSH" = 1 ] && echo "on, the rebased branch goes back to $FORK_URL after the tests pass" || echo "off, nothing is pushed")
 $(if is_side_by_side; then
   echo "- Mode: side-by-side. Once a build is in the feed, run \"t3code-diy install-app\" to put"
   echo "  \"$SIDE_APP_NAME\" in $APPS_DIR next to the official app."
@@ -224,12 +229,12 @@ check_prereqs() {
   fi
   if [ "$RESOLVER_PROVIDER" = codex ]; then
     if type -P codex >/dev/null; then
-      codex login status >/dev/null 2>&1 || miss "Codex login" "run: codex login"
+      codex login status </dev/null >/dev/null 2>&1 || miss "Codex login" "run: codex login"
     else
       miss "Codex CLI (codex)" "see https://developers.openai.com/codex/cli"
     fi
   elif type -P claude >/dev/null; then
-    claude auth status --json 2>/dev/null | grep -q '"loggedIn": *true' \
+    claude auth status --json </dev/null 2>/dev/null | grep -q '"loggedIn": *true' \
       || miss "Claude Code login" "run: claude auth login (or start claude once and log in)"
   else
     miss "Claude Code CLI (claude)" "see https://docs.claude.com/en/docs/claude-code"
@@ -286,6 +291,7 @@ setup_repo() {
     git -C "$REPO" remote set-url origin "$FORK_URL"
   else
     echo "cloning $FORK_URL ($FORK_BRANCH) into $REPO"
+    echo "(the full history, several hundred MB; this can take a few minutes)"
     git clone --branch "$FORK_BRANCH" "$FORK_URL" "$REPO" || { echo "clone failed"; return 1; }
   fi
   if git -C "$REPO" remote get-url upstream >/dev/null 2>&1; then

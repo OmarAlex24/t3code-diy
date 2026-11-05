@@ -83,12 +83,12 @@ resolver_problem() {
   case "$1" in
     claude)
       type -P claude >/dev/null || { echo "the claude CLI is not installed"; return; }
-      claude auth status --json 2>/dev/null | grep -q '"loggedIn": *true' \
+      claude auth status --json </dev/null 2>/dev/null | grep -q '"loggedIn": *true' \
         || echo "the claude CLI is not logged in (run: claude auth login)"
       ;;
     codex)
       type -P codex >/dev/null || { echo "the codex CLI is not installed"; return; }
-      codex login status >/dev/null 2>&1 || echo "the codex CLI is not logged in (run: codex login)"
+      codex login status </dev/null >/dev/null 2>&1 || echo "the codex CLI is not logged in (run: codex login)"
       ;;
   esac
 }
