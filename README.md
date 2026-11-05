@@ -4,18 +4,82 @@ Run your own modified build of [T3 Code](https://github.com/pingdotgg/t3code) on
 it current with upstream, without an Apple Developer account. By default your build is its own app,
 "T3 Code Custom", running next to the official one.
 
-**Unofficial.** This is a personal kit. It is not made, endorsed or supported by T3 Tools. Don't
-report problems with your DIY build to the T3 Code team.
+**Unofficial.** This is a personal kit. It is not made, endorsed or supported by T3 Tools / Ping.
+Don't report problems with your DIY build to the T3 Code team.
+
+There are two ways to use it: run someone else's branch (no fork needed), or keep your own fork
+building every day.
+
+## Try Omar's sandbox build
+
+Omar's fork ([OmarAlex24/t3code](https://github.com/OmarAlex24/t3code), branch
+`feat/sandbox-environments`) adds sandbox environments. Save a sandbox config once (Boat, Daytona,
+Vercel, Upstash or Celesto), and every new thread you start on it gets its own throwaway cloud
+machine that clones the repo from GitHub and runs the thread there. Background and feedback:
+[discussion #27949](https://github.com/pingdotgg/t3code/discussions/27949).
+
+You don't need a fork. The kit clones Omar's branch, rebases it onto upstream `main` on your Mac
+every day, runs the sandbox tests, and builds a "T3 Code Custom" app that sits next to your normal
+T3 Code, with its own data and settings:
+
+```sh
+git clone https://github.com/OmarAlex24/t3code-diy.git
+cd t3code-diy
+./bin/t3code-diy install --yes --no-push \
+  --fork-url https://github.com/OmarAlex24/t3code.git \
+  --branch feat/sandbox-environments \
+  --test-group '^(apps/server/src/sandbox/.*\.test\.ts|packages/contracts/src/sandbox[^/]*\.test\.ts)$' \
+  --test-group '^apps/web/src/.*Sandbox[^/]*\.browser\.test\.tsx$'
+```
+
+`--no-push` matters: you can't push to Omar's repo, and without it every run would fail at the push
+step. The first build starts right away and takes a while (around 30 to 45 minutes cold). Follow it
+with `~/.t3code-diy/kit/bin/t3code-diy status`, and once a build is in the feed:
+
+```sh
+~/.t3code-diy/kit/bin/t3code-diy install-app
+```
+
+Then open T3 Code Custom and set up a sandbox config as described in the fork's
+[docs/user/remote-access.md](https://github.com/OmarAlex24/t3code/blob/feat/sandbox-environments/docs/user/remote-access.md).
+
+## Make your own
+
+Fork `pingdotgg/t3code`, put your changes on a branch, and point the kit at it:
+
+```sh
+./bin/t3code-diy install --yes \
+  --fork-url git@github.com:you/t3code.git --branch my-changes \
+  --test-group '^apps/server/src/myfeature/.*\.test\.ts$'
+```
+
+The kit keeps that branch rebased onto upstream and pushes it back to your fork after the tests
+pass (force-with-lease, see [Caveats](#caveats)). Leave out `--yes` to be asked for each setting.
+
+## Requirements
+
+`install` checks all of these and tells you what's missing:
+
+- A Mac with Apple Silicon (arm64 only)
+- Xcode Command Line Tools (`xcode-select --install`), for git, codesign, clang and python3
+- Node 22 or newer and [Vite+](https://viteplus.dev) (`vp`), which T3 Code uses for installs and tests
+- Rust from [rustup.rs](https://rustup.rs) plus `rustup target add aarch64-apple-darwin` (the app
+  ships a small Rust helper, so this isn't optional)
+- [Claude Code](https://docs.claude.com/en/docs/claude-code), logged in (`claude auth login`), or
+  the [Codex CLI](https://developers.openai.com/codex/cli), logged in (`codex login`) with
+  `--resolver codex`. It resolves rebase conflicts when upstream and the branch collide.
+- About 15 GB of free disk (repo, dependencies, a pristine upstream checkout for the test gate,
+  the last 3 builds)
 
 ## What it does
 
 Every day (and when you log in) a launchd job on your Mac:
 
-1. fetches upstream `main` and your fork's branch, and rebases your branch onto upstream
+1. fetches upstream `main` and the branch you follow, and rebases that branch onto upstream
    (with `git rerere` on, so a conflict you resolved once stays resolved)
 2. if the rebase conflicts, runs Claude Code or Codex headless to resolve it
-3. runs your fork's tests plus upstream's `vp run check:changed`
-4. pushes the rebased branch back to your fork
+3. runs the branch's own tests (your `--test-group`s) plus upstream's `vp run check:changed`
+4. pushes the rebased branch back to your fork (skipped with `--no-push`)
 5. builds the macOS app, signs it with a self-signed certificate that lives only on your Mac,
    and publishes it to a feed served on `127.0.0.1`
 
@@ -31,38 +95,13 @@ macOS notification with the path to the log.
 Everything runs on your machine with your Claude (or Codex) login and your signing key. There's no CI, no
 secrets in GitHub, and no binaries to download: you build your own.
 
-## Requirements
-
-- A Mac with Apple Silicon (arm64 only)
-- Xcode Command Line Tools (`xcode-select --install`)
-- Node and [Vite+](https://viteplus.dev) (`vp`), which T3 Code uses for installs and tests
-- Rust from [rustup.rs](https://rustup.rs) plus `rustup target add aarch64-apple-darwin`
-- [Claude Code](https://docs.claude.com/en/docs/claude-code), logged in (`claude auth login`), or
-  the [Codex CLI](https://developers.openai.com/codex/cli), logged in (`codex login`), for conflicts
-- A fork of `pingdotgg/t3code` with a branch carrying your changes
-- About 15 GB of free disk (repo, dependencies, a pristine upstream checkout for the test gate,
-  the last 3 builds)
-
-`install` checks all of this and tells you what's missing.
-
 ## Install
 
-```sh
-git clone <this repo> t3code-diy
-cd t3code-diy
-./bin/t3code-diy install
-```
-
-It asks for your fork URL, branch, feed port, schedule and conflict resolver. Or pass everything:
-
-```sh
-./bin/t3code-diy install --yes \
-  --fork-url git@github.com:you/t3code.git --branch my-changes \
-  --test-group '^apps/server/src/myfeature/.*\.test\.ts$'
-```
+Either command above does it. Without `--yes`, `install` asks for the repo URL, branch, whether to
+push, feed port, schedule and conflict resolver.
 
 `./bin/t3code-diy install --help` lists every option. Install puts everything in
-`~/.t3code-diy/` (set `DIY_HOME` to use another place): the config, a clone of your fork, the
+`~/.t3code-diy/` (set `DIY_HOME` to use another place): the config, a clone of the branch's repo, the
 signing keychain, builds, the feed and logs. It loads two launchd jobs, `dev.t3code-diy.feed` and
 `dev.t3code-diy.update`, and the first update starts right away. A cold first run takes a while
 (dependencies, a Rust build, a full test pass).
@@ -258,19 +297,23 @@ matches nothing fails the run, so renamed tests don't silently stop running.
 If you write `~/.t3code-diy/fork-notes.md`, it's added to the conflict agent's prompt. A few lines
 on what your fork changes and where it lives help it keep your side of a conflict.
 
-Example fork: [OmarAlex24/t3code](https://github.com/OmarAlex24/t3code), branch
-`feat/sandbox-environments` (cloud sandbox environments). Its gate looks like:
-
-```sh
-FORK_TEST_GROUPS=(
-  '^(apps/server/src/sandbox/.*\.test\.ts|packages/contracts/src/sandbox[^/]*\.test\.ts)$'
-  '^apps/web/src/.*Sandbox[^/]*\.browser\.test\.tsx$'
-)
-```
-
-It's only an example; nothing here depends on it.
+The sandbox command in [Try Omar's sandbox build](#try-omars-sandbox-build) is a real example of
+test groups.
 
 ## Caveats
+
+The basics:
+
+- **Unofficial.** Not made, endorsed or supported by T3 Tools / Ping. Problems with a DIY build
+  go here, not to the T3 Code team.
+- **macOS on Apple Silicon only.** No Intel, no Linux, no Windows.
+- **Self-signed.** The app is signed with a certificate made on your Mac, not by Apple. It isn't
+  notarized, so it's meant for the Mac that built it, and passkeys don't work (below).
+- **Local feed only.** Updates come from `127.0.0.1` on your Mac. Nothing is downloaded from
+  anyone else and there's nothing to share.
+- **Following someone else's branch** means running their code with your provider logins, rebased
+  on your Mac. Your local rebase can differ from theirs, and their force-pushes are picked up on
+  the next run. Read the diff if you care.
 
 Side-by-side:
 
@@ -305,7 +348,6 @@ Side-by-side:
 
 Both modes:
 
-- **macOS arm64 only.** No Intel, no Linux, no Windows.
 - **Passkeys don't work** in a self-signed build: they need an Apple-issued entitlement. Email and
   OAuth sign-in work.
 - **T3 Connect** works because the build uses the public Clerk and relay settings upstream ships in
