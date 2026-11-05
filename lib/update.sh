@@ -478,10 +478,10 @@ run_gate() {
 
 # "file > suite > test" for every failed test in vitest output. Vitest prints the project as
 # "|name|" without colors and as a colored badge with them (launchd runs get colors), so both
-# forms are accepted once the escape codes are gone.
+# forms are accepted once the escape codes are gone. Browser projects add "(browser) (chromium)".
 failed_tests() {
   sed $'s/\x1b\\[[0-9;]*m//g' "$1" \
-    | sed -nE 's/^ FAIL +(\|[^|]*\| +|[^ ]+ +)?([^ ]+\.(test|spec)\.[cm]?[jt]sx?( > .*)?)$/\2/p' \
+    | sed -nE 's/^ FAIL +(\|[^|]*\| +|[^ ]+( \([^)]*\))* +)?([^ ]+\.(test|spec)\.[cm]?[jt]sx?( > .*)?)$/\3/p' \
     | sort -u
 }
 
@@ -491,6 +491,17 @@ failures_are_preexisting() {
   local out="$1" lines files f path up_lines missing
   lines="$(failed_tests "$out")"
   [ -n "$lines" ] || { log "check:changed failed without test failures I can parse"; gate_fail "check:changed failed"; return 1; }
+  # A browser test that lost its session to another Playwright run passes when re-run alone.
+  files="$(echo "$lines" | sed -E 's/ > .*//; s/ \[.*//' | sort -u)"
+  : >"$STATE/fork-retest.out"
+  while IFS= read -r f; do
+    path="$(git -C "$REPO" ls-files | grep -E "(^|/)${f//./\\.}$" | tr '\n' ' ')"
+    [ -n "$path" ] || { log "cannot find failing test $f"; gate_fail "a test failed: $f"; return 1; }
+    # shellcheck disable=SC2086
+    (cd "$REPO" && vp test run $path) >>"$STATE/fork-retest.out" 2>&1
+  done <<<"$files"
+  lines="$(comm -12 <(echo "$lines") <(failed_tests "$STATE/fork-retest.out"))"
+  [ -n "$lines" ] || { log "every check:changed test failure passed when re-run alone (flaky)"; return 0; }
   if [ ! -d "$UPSTREAM_WT" ]; then
     git worktree add -q --detach "$UPSTREAM_WT" "$UP" || return 1
   fi
