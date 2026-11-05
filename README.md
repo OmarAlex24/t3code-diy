@@ -33,8 +33,10 @@ cd t3code-diy
 ```
 
 `--no-push` matters: you can't push to Omar's repo, and without it every run would fail at the push
-step. The first build starts right away and takes a while (around 30 to 45 minutes cold). Follow it
-with `~/.t3code-diy/kit/bin/t3code-diy status`, and once a build is in the feed:
+step. Install clones about 700 MB of history (minutes, depending on your connection), then the
+first build starts right away and takes roughly 10 to 20 minutes: tests, a Rust helper, the
+Electron build and signing. Follow it with `~/.t3code-diy/kit/bin/t3code-diy status`, and once a
+build is in the feed:
 
 ```sh
 ~/.t3code-diy/kit/bin/t3code-diy install-app
