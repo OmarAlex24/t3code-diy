@@ -396,7 +396,10 @@ Both modes:
   are saved first and put back afterwards, even when the run fails or is killed (then the next run
   puts them back), and a remote the agent added is removed. After the agent exits the job checks
   that your branch on GitHub didn't move. The script itself pushes, and only after the tests pass.
-  Read the logs now and then.
+  Claude Code runs with background tasks off and a 30-minute command timeout, so it waits for its
+  test runs instead of moving them to the background and waiting for a report that never comes.
+  When the agent runs out of time, it is stopped along with every process it started. Read the
+  logs now and then.
 - **Force-push.** The daily job rewrites your branch (it's a rebase) and pushes it with
   `--force-with-lease`. If you pushed something in between, the push fails and nothing is built.
   Don't use the branch for anything that can't handle being rebased. For pushes over SSH the job
