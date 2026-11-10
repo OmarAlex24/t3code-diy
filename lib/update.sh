@@ -95,12 +95,17 @@ cmd_update() {
     log "rebasing $(git rev-list --count "$MB..$ORIG") fork commits onto $UP_REF ($(git rev-list --count "$MB..$UP") new upstream commits)"
     REBASED=1
     git rebase "$UP_REF"
-    local used_resolver=0 unresolved
+    local used_resolver=0 unresolved step
     while rebase_in_progress; do
       unresolved="$(git diff --name-only --diff-filter=U)"
       if [ -z "$unresolved" ] && [ "$used_resolver" = 0 ]; then
         log "conflicts resolved by rerere; continuing"
+        step="$(rebase_step)"
         git add -u && git rebase --continue && continue
+        # Stopped again: a later commit (often one rerere also resolved) gets another pass; the
+        # same commit stopping twice goes to the resolver.
+        { ! rebase_in_progress || [ "$(rebase_step)" != "$step" ]; } && continue
+        unresolved="$(git diff --name-only --diff-filter=U)"
       fi
       [ "$used_resolver" = 1 ] && break
       log "conflicts in: $(echo "$unresolved" | tr '\n' ' ')"
@@ -423,6 +428,9 @@ fail() {
 }
 
 rebase_in_progress() { [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; }
+
+# The number of the commit the rebase is replaying, to tell whether --continue moved on.
+rebase_step() { cat .git/rebase-merge/msgnum .git/rebase-apply/next 2>/dev/null; }
 
 restore_branch() {
   rebase_in_progress && git rebase --abort
