@@ -260,7 +260,7 @@ EOF
 
 update_cleanup() {
   local rc=$?
-  [ -n "${RESOLVER_PID:-}" ] && kill -- "-$RESOLVER_PID" 2>/dev/null
+  [ -n "${RESOLVER_PID:-}" ] && stop_resolver "$RESOLVER_PID"
   restore_push_urls
   revert_side_patch
   if [ -z "$RUN_RESULT" ]; then
@@ -451,13 +451,15 @@ run_gate() {
     node "$pw" install --only-shell chromium \
       || gate_fail "downloading Playwright's Chromium for the browser tests failed" || return 1
   fi
-  local group files
+  local group files group_out="$STATE/fork-tests.out"
   for group in "${FORK_TEST_GROUPS[@]+"${FORK_TEST_GROUPS[@]}"}"; do
     files="$(group_files "$group")"
     [ -n "$files" ] || { log "test group '$group' matches no files"; gate_fail "the test group '$group' matches no files"; return 1; }
     log "fork tests ($group): $files"
     # shellcheck disable=SC2086
-    vp test run $files || gate_fail "your fork's tests failed ($(echo "$files" | wc -w | tr -d ' ') file(s) in '$group')" || return 1
+    vp test run $files </dev/null 2>&1 | tee "$group_out"
+    [ "${PIPESTATUS[0]}" = 0 ] && continue
+    fork_failures_are_flaky "$group" "$files" "$group_out" || return 1
   done
   [ "$RUN_CHECK_CHANGED" = 1 ] || return 0
   log "vp run check:changed $UP_REF"
@@ -481,21 +483,107 @@ failed_tests() {
     | sort -u
 }
 
+# rerun_failed_tests <lines> <dir> <out> [paths]: re-runs once, in <dir>, each test file named in
+# <lines> (failed_tests output), writing the output to <out>. Files are looked up among [paths]
+# (space-separated, relative to <dir>) or, without them, among <dir>'s git ls-files. Sets
+# RERUN_RC to 0 when every run passed (else a failing run's status). Returns 1, with RERUN_MISSING
+# set, when a file can't be found.
+rerun_failed_tests() {
+  local lines="$1" dir="$2" out="$3" paths="${4:-}" f path
+  RERUN_RC=0 RERUN_MISSING=""
+  : >"$out"
+  while IFS= read -r f; do
+    path="$(if [ -n "$paths" ]; then tr ' ' '\n' <<<"$paths"; else git -C "$dir" ls-files; fi \
+      | grep -E "(^|/)${f//./\\.}$" | tr '\n' ' ')"
+    [ -n "$path" ] || { RERUN_MISSING="$f"; return 1; }
+    # shellcheck disable=SC2086
+    (cd "$dir" && vp test run $path </dev/null) >>"$out" 2>&1 || RERUN_RC=$?
+  done < <(echo "$lines" | sed -E 's/ > .*//; s/ \[.*//' | sort -u)
+}
+
+# "N test(s) failed in '<group>'<note>: <first test>", one line for the gate reason. The test is
+# named by its file's basename, as "File.test.tsx > suite > test".
+tests_failed_reason() {
+  local lines="$1" group="$2" note="$3" n first
+  n="$(echo "$lines" | wc -l | tr -d ' ')"
+  first="$(echo "$lines" | head -1 | sed -E 's|^[^ ]*/||')"
+  if [ "$n" = 1 ]; then
+    printf "1 test failed in '%s'%s: %s" "$group" "$note" "$first"
+  else
+    printf "%s tests failed in '%s'%s, first: %s" "$n" "$group" "$note" "$first"
+  fi
+}
+
+# Why vitest output <out> can't be trusted to name every failure, or nothing when it can: the
+# summary's failed files must all show up among the failed tests <lines>, and no error may have
+# happened outside a test. A file that fails to load names no test, so re-running only the named
+# ones would miss it.
+unnamed_failures() {
+  local out="$1" lines="$2" summary failed named
+  summary="$(sed $'s/\x1b\\[[0-9;]*m//g' "$out")"
+  if grep -qE '^ *Errors +[0-9]+ errors?' <<<"$summary"; then
+    printf 'errors outside the tests'; return 0
+  fi
+  failed="$(sed -nE 's/^ *Test Files +([0-9]+) failed.*/\1/p' <<<"$summary" | tail -1)"
+  named="$(echo "$lines" | sed -E 's/ > .*//; s/ \[.*//' | sort -u | wc -l | tr -d ' ')"
+  if [ -z "$failed" ]; then
+    printf 'no failed-file count in the summary'
+  elif [ "$failed" -gt "$named" ]; then
+    printf '%s file(s) failed, %s with a named test' "$failed" "$named"
+  fi
+}
+
+# fork_failures_are_flaky <group> <files> <out>: a fork test group failed with output <out>.
+# Re-runs the failing files once and succeeds only when that re-run passes: a loaded machine makes
+# browser tests time out now and then. Otherwise says which tests failed.
+fork_failures_are_flaky() {
+  local group="$1" files="$2" out="$3" lines retest="$STATE/fork-tests-retest.out" why again still
+  lines="$(failed_tests "$out")"
+  if [ -z "$lines" ]; then
+    log "fork tests in '$group' failed without test failures I can parse"
+    gate_fail "your fork's tests failed in '$group' (no failed test named in the output)"
+    return 1
+  fi
+  why="$(unnamed_failures "$out" "$lines")"
+  if [ -n "$why" ]; then
+    log "fork tests in '$group' failed, not only in tests I can name ($why):"; echo "$lines" | sed 's/^/  /'
+    gate_fail "$(tests_failed_reason "$lines" "$group" " ($why)")"
+    return 1
+  fi
+  log "fork tests failed in '$group'; re-running the failing file(s) once:"; echo "$lines" | sed 's/^/  /'
+  if ! rerun_failed_tests "$lines" "$REPO" "$retest" "$files"; then
+    log "cannot find the file of failing test $RERUN_MISSING among the group's files"
+    gate_fail "$(tests_failed_reason "$lines" "$group" "")"
+    return 1
+  fi
+  sed 's/^/  re-run| /' "$retest"
+  if [ "$RERUN_RC" = 0 ]; then
+    log "every failing test in '$group' passed when re-run (flaky):"; echo "$lines" | sed 's/^/  /'
+    return 0
+  fi
+  # Name what failed again, else what failed this time, else (a crash) what failed the first time.
+  again="$(failed_tests "$retest")"
+  still="$(comm -12 <(echo "$lines") <(echo "$again"))"
+  log "the re-run failed too (exit $RERUN_RC):"; echo "${again:-(no test named)}" | sed 's/^/  /'
+  if [ -n "$still" ]; then
+    gate_fail "$(tests_failed_reason "$still" "$group" " (also on re-run)")"
+  elif [ -n "$again" ]; then
+    gate_fail "$(tests_failed_reason "$again" "$group" " (on the re-run)")"
+  else
+    gate_fail "$(tests_failed_reason "$lines" "$group" " (the re-run failed too)")"
+  fi
+  return 1
+}
+
 # Re-runs the failing test files on a pristine upstream checkout; succeeds only when every
 # failure reported for the fork also fails there (pre-existing upstream failures).
 failures_are_preexisting() {
-  local out="$1" lines files f path up_lines missing
+  local out="$1" lines up_lines missing
   lines="$(failed_tests "$out")"
   [ -n "$lines" ] || { log "check:changed failed without test failures I can parse"; gate_fail "check:changed failed"; return 1; }
   # A browser test that lost its session to another Playwright run passes when re-run alone.
-  files="$(echo "$lines" | sed -E 's/ > .*//; s/ \[.*//' | sort -u)"
-  : >"$STATE/fork-retest.out"
-  while IFS= read -r f; do
-    path="$(git -C "$REPO" ls-files | grep -E "(^|/)${f//./\\.}$" | tr '\n' ' ')"
-    [ -n "$path" ] || { log "cannot find failing test $f"; gate_fail "a test failed: $f"; return 1; }
-    # shellcheck disable=SC2086
-    (cd "$REPO" && vp test run $path) >>"$STATE/fork-retest.out" 2>&1
-  done <<<"$files"
+  rerun_failed_tests "$lines" "$REPO" "$STATE/fork-retest.out" \
+    || { log "cannot find failing test $RERUN_MISSING"; gate_fail "a test failed: $RERUN_MISSING"; return 1; }
   lines="$(comm -12 <(echo "$lines") <(failed_tests "$STATE/fork-retest.out"))"
   [ -n "$lines" ] || { log "every check:changed test failure passed when re-run alone (flaky)"; return 0; }
   if [ ! -d "$UPSTREAM_WT" ]; then
@@ -503,14 +591,8 @@ failures_are_preexisting() {
   fi
   git -C "$UPSTREAM_WT" checkout -q -f --detach "$UP" || return 1
   (cd "$UPSTREAM_WT" && vp i >/dev/null 2>&1) || return 1
-  files="$(echo "$lines" | sed -E 's/ > .*//; s/ \[.*//' | sort -u)"
-  : >"$STATE/upstream-test.out"
-  while IFS= read -r f; do
-    path="$(git -C "$UPSTREAM_WT" ls-files | grep -E "(^|/)${f//./\\.}$" | tr '\n' ' ')"
-    [ -n "$path" ] || { log "failing test $f does not exist upstream"; gate_fail "a test failed: $f"; return 1; }
-    # shellcheck disable=SC2086
-    (cd "$UPSTREAM_WT" && vp test run $path) >>"$STATE/upstream-test.out" 2>&1
-  done <<<"$files"
+  rerun_failed_tests "$lines" "$UPSTREAM_WT" "$STATE/upstream-test.out" \
+    || { log "failing test $RERUN_MISSING does not exist upstream"; gate_fail "a test failed: $RERUN_MISSING"; return 1; }
   up_lines="$(failed_tests "$STATE/upstream-test.out")"
   missing="$(comm -23 <(echo "$lines") <(echo "$up_lines"))"
   if [ -n "$missing" ]; then
@@ -556,6 +638,11 @@ Hard rules:
 - Never run git push, git reset, git rebase --abort, git rebase --skip, or anything outside this repo.
 - Never touch ~/.t3, never start a dev server or the app.
 - Run each command on its own (no \`cd\`, \`&&\`, pipes or subshells) so the permission rules match.
+- Run every command in the foreground and wait for it to finish, tests and checks especially;
+  they can take 10 minutes or more on a busy machine, so give them a long timeout (up to
+  $((RESOLVER_BASH_TIMEOUT_MS / 60000)) minutes). Never start a background task, a monitor or a watcher, and never
+  wait for one: nothing in the background reports back once you stop.
+- Exit as soon as the rebase is complete and the checks above have run. Don't wait for anything.
 - Commit messages use \`<type>: <description>\`.
 EOF
   if [ -f "$DIY_HOME/fork-notes.md" ]; then
@@ -641,6 +728,39 @@ remote_branch_sha() {
   git -C "$REPO" ls-remote origin "refs/heads/$FORK_BRANCH" 2>/dev/null | awk '{print $1}'
 }
 
+# Every descendant of the given pid, one per line, from one ps snapshot.
+process_tree() {
+  ps -ax -o pid= -o ppid= | awk -v root="$1" '
+    { kids[$2] = kids[$2] " " $1 }
+    END { n = 1; q[1] = root
+      for (i = 1; i <= n; i++) { m = split(kids[q[i]], c, " "); for (j = 1; j <= m; j++) { print c[j]; q[++n] = c[j] } } }'
+}
+
+any_alive() { local p; for p in "$@"; do kill -0 "$p" 2>/dev/null && return 0; done; return 1; }
+
+# Stops the resolver (its process group leader is the pid) and everything it started. Claude Code
+# runs each command in a process group of its own and only stops those itself on SIGTERM; when it
+# has to be SIGKILLed, a test run it started would go on in the repo. So the whole process tree is
+# collected first and stopped along with the group.
+stop_resolver() {
+  local pid="$1" tree i
+  tree="$(process_tree "$pid" | tr '\n' ' ')"
+  kill -- "-$pid" 2>/dev/null
+  # shellcheck disable=SC2086
+  [ -n "$tree" ] && kill $tree 2>/dev/null
+  for i in 1 2 3 4 5; do
+    # shellcheck disable=SC2086
+    kill -0 -- "-$pid" 2>/dev/null || any_alive $tree || break
+    sleep 1
+  done
+  # Whatever it started in the meantime too; once it is gone its orphans are only in the first list.
+  tree="$tree $(process_tree "$pid" | tr '\n' ' ')"
+  kill -9 -- "-$pid" 2>/dev/null
+  # shellcheck disable=SC2086
+  kill -9 $tree 2>/dev/null
+  return 0
+}
+
 run_resolver() {
   local prompt_file="$STATE/resolver-prompt.txt" out="$STATE/resolver-output.txt" problem before after
   resolver_prompt >"$prompt_file"
@@ -667,8 +787,7 @@ run_resolver() {
     sleep 15; waited=$((waited + 15))
     if [ "$waited" -ge "$limit" ]; then
       log "$(resolver_label) timed out after ${limit}s; stopping it"
-      kill -- "-$RESOLVER_PID" 2>/dev/null
-      sleep 5; kill -9 -- "-$RESOLVER_PID" 2>/dev/null
+      stop_resolver "$RESOLVER_PID"
       break
     fi
   done
@@ -685,13 +804,21 @@ run_resolver() {
   fi
 }
 
+# How long one resolver command (a test run, check:changed) may take.
+RESOLVER_BASH_TIMEOUT_MS=1800000
+
 # claude -p with an allowlist: edits, git add/commit/rebase --continue and the test commands only.
+# Claude Code moves a command that outlives its timeout (2 minutes by default) to the background,
+# and check:changed takes longer than that, so the agent ended up waiting for a background run that
+# never reported back until the resolver timed out. Background tasks are off, and the timeout long.
 resolver_cmd_claude() {
   local model=() effort
   [ -n "$RESOLVER_MODEL" ] && model=(--model "$RESOLVER_MODEL")
   effort="$(resolver_effort)"
   [ -n "$effort" ] && model+=(--effort "$effort")
-  claude -p "$(cat "$1")" \
+  CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 \
+    BASH_DEFAULT_TIMEOUT_MS="$RESOLVER_BASH_TIMEOUT_MS" BASH_MAX_TIMEOUT_MS="$RESOLVER_BASH_TIMEOUT_MS" \
+    claude -p "$(cat "$1")" \
     "${model[@]+"${model[@]}"}" \
     --strict-mcp-config --no-session-persistence --setting-sources project \
     --permission-mode acceptEdits \
@@ -705,7 +832,7 @@ resolver_cmd_claude() {
     "Bash(ls:*)" "Bash(cat:*)" "Bash(head:*)" "Bash(tail:*)" "Bash(wc:*)" "Bash(rg:*)" "Bash(grep:*)" \
     --disallowedTools "Bash(git push:*)" "Bash(git reset:*)" "Bash(git rebase --abort:*)" \
     "Bash(git rebase --skip:*)" "Bash(git checkout -B:*)" "Bash(git config:*)" "Bash(git remote:*)" \
-    "WebFetch" "WebSearch" \
+    "WebFetch" "WebSearch" "Monitor" \
     </dev/null
 }
 

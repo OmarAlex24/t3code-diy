@@ -293,7 +293,12 @@ Configs from before modes existed stay in replace mode.
   Renaming and the `Info.plist` changes happen before signing, and the feed zip is made from the
   signed app.
 - The test gate runs your `FORK_TEST_GROUPS` (must pass) and `vp run check:changed upstream/main`.
-  A check:changed test failure only counts as OK if the same test also fails on a pristine upstream
+  When a fork test group fails, the files of its failing tests run once more on their own, and if
+  that re-run passes the failures count as flaky (a loaded machine makes browser tests time out now
+  and then); the log names them. A re-run that fails, or a failure the output doesn't pin on a test
+  (a file that won't load, an error outside the tests), blocks the build, and the failure says how
+  many tests failed and names the first. A check:changed test failure is re-run alone the same way,
+  and one that fails again only counts as OK if the same test also fails on a pristine upstream
   checkout (`~/.t3code-diy/upstream-check`). Anything else blocks the build.
 - Browser tests (`*.browser.test.tsx`) need Playwright's headless Chromium. The gate downloads the
   version the repo pins into `~/.t3code-diy/playwright-browsers` (once, about 100 MB), the same
@@ -391,7 +396,10 @@ Both modes:
   are saved first and put back afterwards, even when the run fails or is killed (then the next run
   puts them back), and a remote the agent added is removed. After the agent exits the job checks
   that your branch on GitHub didn't move. The script itself pushes, and only after the tests pass.
-  Read the logs now and then.
+  Claude Code runs with background tasks off and a 30-minute command timeout, so it waits for its
+  test runs instead of moving them to the background and waiting for a report that never comes.
+  When the agent runs out of time, it is stopped along with every process it started. Read the
+  logs now and then.
 - **Force-push.** The daily job rewrites your branch (it's a rebase) and pushes it with
   `--force-with-lease`. If you pushed something in between, the push fails and nothing is built.
   Don't use the branch for anything that can't handle being rebased. For pushes over SSH the job
