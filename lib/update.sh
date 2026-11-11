@@ -515,9 +515,11 @@ run_gate() {
     fork_failures_are_flaky "$group" "$files" "$group_out" || return 1
   done
   [ "$RUN_CHECK_CHANGED" = 1 ] || return 0
-  log "vp run check:changed $GATE_REF"
+  # check:changed kills a step after 15 minutes. Its test step runs every test the fork's diff
+  # touches, which outgrows that as the fork grows, and nobody waits on this run.
+  log "vp run check:changed $GATE_REF --timeout 2700"
   local out="$STATE/check-changed.out"
-  vp run check:changed "$GATE_REF" 2>&1 | tee "$out"
+  vp run check:changed "$GATE_REF" --timeout 2700 2>&1 | tee "$out"
   [ "${PIPESTATUS[0]}" = 0 ] && return 0
   # Only test steps may fail, and only with failures plain upstream has too.
   local bad
