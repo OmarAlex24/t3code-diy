@@ -103,10 +103,14 @@ load_last_run() {
   LR_STARTED="$(iso_from_local "$name")"
   line="$(grep -E '^\[[0-9-]+ [0-9:]+\] ' "$log" | tail -1)"
   LR_ENDED="$(iso_from_local "$(echo "$line" | sed -E 's/^\[([^]]+)\].*/\1/')")"
+  # A run that built on the upstream the branch already contains says so (update.sh,
+  # build_on_contained_upstream).
+  local behind
+  behind="$(grep -E '^\[[0-9-]+ [0-9:]+\] behind upstream: ' "$log" | tail -1 | sed -E 's/^\[[^]]+\] behind upstream: //')"
   if line="$(grep -E '^\[[0-9-]+ [0-9:]+\] == done: ' "$log" | tail -1)" && [ -n "$line" ]; then
-    LR_RESULT=ok; LR_VERSION="${line##*== done: }"; LR_REASON="built $LR_VERSION"
+    LR_RESULT=ok; LR_VERSION="${line##*== done: }"; LR_REASON="built $LR_VERSION${behind:+ on $behind}"
   elif grep -qE '^\[[0-9-]+ [0-9:]+\] nothing changed since the last build' "$log"; then
-    LR_RESULT=up_to_date; LR_REASON="nothing changed since the last build"
+    LR_RESULT=up_to_date; LR_REASON="nothing changed since the last build${behind:+; it is on $behind}"
   elif line="$(grep -E '^\[[0-9-]+ [0-9:]+\] FAILED' "$log" | tail -1)" && [ -n "$line" ]; then
     LR_REASON="$(echo "$line" | sed -E 's/^\[[^]]+\] FAILED( \([a-z_]+\))?: //; s/;? ?the installed version is unchanged\.?//')"
     case "$LR_REASON" in

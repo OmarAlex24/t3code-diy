@@ -3,10 +3,10 @@
 
 # Settings `config set` may change, each with its own check. The rest are install's business
 # (re-run install for schedule, port, labels and the SIDE_* values; they need launchd or a rebuild).
-CONFIG_SETTABLE="RESOLVER_PROVIDER RESOLVER_MODEL RESOLVER_EFFORT RESOLVER_TIMEOUT_MIN PUSH RUN_CHECK_CHANGED"
+CONFIG_SETTABLE="RESOLVER_PROVIDER RESOLVER_MODEL RESOLVER_EFFORT RESOLVER_TIMEOUT_MIN PUSH RUN_CHECK_CHANGED FALLBACK_ON_CONFLICT"
 CONFIG_READABLE="FORK_URL FORK_BRANCH UPSTREAM_URL UPSTREAM_BRANCH FEED_PORT LABEL_PREFIX SCHEDULE_HOUR
-SCHEDULE_MINUTE RUN_AT_LOGIN PUSH RESOLVER_PROVIDER RESOLVER_MODEL RESOLVER_EFFORT RESOLVER_TIMEOUT_MIN RUN_CHECK_CHANGED MODE
-ICON SIDE_APP_NAME SIDE_BUNDLE_ID SIDE_USER_DATA_NAME SIDE_T3_HOME SIDE_PORT APP_NAME APPS_DIR USERDATA_DIR
+SCHEDULE_MINUTE RUN_AT_LOGIN PUSH RESOLVER_PROVIDER RESOLVER_MODEL RESOLVER_EFFORT RESOLVER_TIMEOUT_MIN RUN_CHECK_CHANGED
+FALLBACK_ON_CONFLICT MODE ICON SIDE_APP_NAME SIDE_BUNDLE_ID SIDE_USER_DATA_NAME SIDE_T3_HOME SIDE_PORT APP_NAME APPS_DIR USERDATA_DIR
 UPDATER_CACHE_DIR_NAME KEEP_BUILDS SEQ_START TOOL_PATH"
 
 config_usage() {
@@ -22,6 +22,8 @@ set changes (all pairs are checked before anything is written):
   RESOLVER_TIMEOUT_MIN  minutes the resolver may run, 5-600
   PUSH                  1 pushes the rebased branch to your fork, 0 doesn't
   RUN_CHECK_CHANGED     1 runs upstream's vp run check:changed in the test gate, 0 doesn't
+  FALLBACK_ON_CONFLICT  1 builds the branch on the upstream it already contains when the rebase
+                        onto the newest upstream conflicts beyond the resolver, 0 fails the run
 
 get reads any scalar setting: $(echo "$CONFIG_READABLE" | tr '\n' ' ')
 EOF2
@@ -52,7 +54,7 @@ cmd_config() {
           RESOLVER_MODEL) valid_resolver_model "$value" || { echo "RESOLVER_MODEL '$value' is not a model name" >&2; return 2; } ;;
           RESOLVER_EFFORT) effort_given=1 ;;
           RESOLVER_TIMEOUT_MIN) valid_resolver_timeout "$value" || { echo "RESOLVER_TIMEOUT_MIN must be 5-600" >&2; return 2; } ;;
-          PUSH | RUN_CHECK_CHANGED) case "$value" in 0 | 1) ;; *) echo "$key must be 0 or 1" >&2; return 2 ;; esac ;;
+          PUSH | RUN_CHECK_CHANGED | FALLBACK_ON_CONFLICT) case "$value" in 0 | 1) ;; *) echo "$key must be 0 or 1" >&2; return 2 ;; esac ;;
         esac
         printf -v "$key" '%s' "$value"
       done

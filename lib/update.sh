@@ -87,63 +87,22 @@ cmd_update() {
   done < <(comm -13 <(migration_entries "$MB" | sort) <(migration_entries "$ORIG" | sort))
 
   RR_BEFORE="$(ls -1 .git/rr-cache 2>/dev/null | sort)"
-  REBASED=0
   STAGE="rebase"
-  if git merge-base --is-ancestor "$UP" "$ORIG"; then
-    log "branch already contains $UP_REF; no rebase needed"
-  else
-    log "rebasing $(git rev-list --count "$MB..$ORIG") fork commits onto $UP_REF ($(git rev-list --count "$MB..$UP") new upstream commits)"
-    REBASED=1
-    git rebase "$UP_REF"
-    local used_resolver=0 unresolved step
-    while rebase_in_progress; do
-      unresolved="$(git diff --name-only --diff-filter=U)"
-      if [ -z "$unresolved" ] && [ "$used_resolver" = 0 ]; then
-        log "conflicts resolved by rerere; continuing"
-        step="$(rebase_step)"
-        git add -u && git rebase --continue && continue
-        # Stopped again: a later commit (often one rerere also resolved) gets another pass; the
-        # same commit stopping twice goes to the resolver.
-        { ! rebase_in_progress || [ "$(rebase_step)" != "$step" ]; } && continue
-        unresolved="$(git diff --name-only --diff-filter=U)"
-      fi
-      [ "$used_resolver" = 1 ] && break
-      log "conflicts in: $(echo "$unresolved" | tr '\n' ' ')"
-      used_resolver=1
-      run_resolver
-    done
-    if rebase_in_progress; then
-      restore_branch
-      RUN_RESULT=conflict_unresolved
-      fail "$(resolver_label) could not resolve the rebase conflicts in $(echo "$unresolved" | wc -l | tr -d ' ') file(s)"
-    fi
-    git merge-base --is-ancestor "$UP" HEAD || { restore_branch; fail "rebase result does not contain $UP_REF"; }
-    [ -z "$(git status --porcelain --untracked-files=no)" ] || { restore_branch; fail "rebase left uncommitted changes"; }
-    [ "$(migration_entries HEAD)" = "$(migration_entries "$UP")" ] \
-      || { restore_branch; RUN_RESULT=migration_collision; fail "upstream's migration list differs from $UP_REF after the rebase"; }
-  fi
+  rebase_onto_upstream
   HEAD_SHA="$(git rev-parse HEAD)"
   log "result HEAD=$HEAD_SHA ($(git rev-list --count "$UP..HEAD") commits on top of upstream)"
 
   if [ "$HEAD_SHA" = "$(cat "$STATE/last-built-sha" 2>/dev/null)" ] && [ "$FORCE" = 0 ]; then
     log "nothing changed since the last build ($HEAD_SHA); done"
     RUN_RESULT=up_to_date
-    RUN_REASON="nothing changed since the last build"
+    RUN_REASON="nothing changed since the last build${BEHIND_NOTE:+; it is on $BEHIND_NOTE}"
     RUN_VERSION="$(cat "$STATE/last-version" 2>/dev/null)"
     exit 0
   fi
 
   # ------------------------------------------------------------ tests
   STAGE="tests"
-  if ! run_gate; then
-    if [ "$REBASED" = 1 ]; then
-      log "tests failed after rebase; restoring $FORK_BRANCH to $ORIG"
-      restore_branch
-      vp i >/dev/null 2>&1
-    fi
-    fail "$(cat "$STATE/gate-reason" 2>/dev/null || echo "the tests failed")"
-  fi
-  log "tests green"
+  gate_or_fail
   STAGE="push"
 
   # ------------------------------------------------------------ push
@@ -254,13 +213,99 @@ EOF
 
   log "== done: $version"
   RUN_RESULT=ok
-  RUN_REASON="built $version"
+  RUN_REASON="built $version${BEHIND_NOTE:+ on $BEHIND_NOTE}"
+  local behind=""
+  [ -n "$BEHIND_NOTE" ] && behind=" It is built on $BEHIND_NOTE."
   if [ -d "$INSTALLED_APP" ]; then
-    notify "build ready" "$version is in the local feed. Use Check for updates in $INSTALLED_NAME." && log "notification sent"
+    notify "build ready" "$version is in the local feed.$behind Use Check for updates in $INSTALLED_NAME." && log "notification sent"
   else
-    notify "build ready" "$version is ready. Install it with: t3code-diy $(is_side_by_side && echo install-app || echo switch)" && log "notification sent"
+    notify "build ready" "$version is ready.$behind Install it with: t3code-diy $(is_side_by_side && echo install-app || echo switch)" && log "notification sent"
   fi
   exit 0
+}
+
+# Rebases $FORK_BRANCH onto $UP_REF: rerere first, then the resolver once. Sets REBASED, and
+# GATE_REF to the upstream the gate compares against. When conflicts remain the branch goes back to
+# $ORIG, and then either the run fails (FALLBACK_ON_CONFLICT=0) or build_on_contained_upstream
+# points the rest of the run at the upstream $ORIG already contains.
+rebase_onto_upstream() {
+  REBASED=0
+  GATE_REF="$UP_REF"
+  BEHIND_NOTE="" BEHIND_SHORT="" BEHIND_DATE="" RESOLVER_PROBLEM=""
+  if git merge-base --is-ancestor "$UP" "$ORIG"; then
+    log "branch already contains $UP_REF; no rebase needed"
+    return 0
+  fi
+  local mb
+  mb="$(git merge-base "$ORIG" "$UP")"
+  log "rebasing $(git rev-list --count "$mb..$ORIG") fork commits onto $UP_REF ($(git rev-list --count "$mb..$UP") new upstream commits)"
+  REBASED=1
+  git rebase "$UP_REF"
+  local used_resolver=0 unresolved="" step
+  while rebase_in_progress; do
+    unresolved="$(git diff --name-only --diff-filter=U)"
+    if [ -z "$unresolved" ] && [ "$used_resolver" = 0 ]; then
+      log "conflicts resolved by rerere; continuing"
+      step="$(rebase_step)"
+      git add -u && git rebase --continue && continue
+      # Stopped again: a later commit (often one rerere also resolved) gets another pass; the
+      # same commit stopping twice goes to the resolver.
+      { ! rebase_in_progress || [ "$(rebase_step)" != "$step" ]; } && continue
+      unresolved="$(git diff --name-only --diff-filter=U)"
+    fi
+    [ "$used_resolver" = 1 ] && break
+    log "conflicts in: $(echo "$unresolved" | tr '\n' ' ')"
+    used_resolver=1
+    # Returns 1 only when the resolver can't start and FALLBACK_ON_CONFLICT is on.
+    run_resolver || break
+  done
+  if rebase_in_progress; then
+    restore_branch
+    if [ "$FALLBACK_ON_CONFLICT" = 1 ]; then
+      build_on_contained_upstream "$unresolved"
+      return 0
+    fi
+    RUN_RESULT=conflict_unresolved
+    fail "$(resolver_label) could not resolve the rebase conflicts in $(echo "$unresolved" | wc -l | tr -d ' ') file(s)"
+  fi
+  git merge-base --is-ancestor "$UP" HEAD || { restore_branch; fail "rebase result does not contain $UP_REF"; }
+  [ -z "$(git status --porcelain --untracked-files=no)" ] || { restore_branch; fail "rebase left uncommitted changes"; }
+  [ "$(migration_entries HEAD)" = "$(migration_entries "$UP")" ] \
+    || { restore_branch; RUN_RESULT=migration_collision; fail "upstream's migration list differs from $UP_REF after the rebase"; }
+}
+
+# build_on_contained_upstream <files>: the rebase onto $UP_REF conflicted in <files> and the branch
+# is back at $ORIG. The run goes on with $ORIG as it is: UP and GATE_REF become the upstream commit
+# it already contains, so check:changed and the pre-existing-failure check compare against that,
+# nothing is pushed (HEAD is $ORIG), and BEHIND_NOTE carries "upstream from <date>; ..." into the
+# run's reason. The after-rebase migration check doesn't apply: the branch wasn't rewritten.
+build_on_contained_upstream() {
+  local files
+  files="$(echo "$1" | sed '/^$/d' | paste -sd, - | sed 's/,/, /g')"
+  UP="$(git merge-base "$ORIG" "$UP_REF")" || fail "no common upstream commit between $FORK_BRANCH and $UP_REF"
+  GATE_REF="$UP"
+  REBASED=0
+  BEHIND_SHORT="$(git rev-parse --short=12 "$UP")"
+  BEHIND_DATE="$(git log -1 --date=short --format=%cd "$UP")"
+  BEHIND_NOTE="upstream from $BEHIND_DATE; the newest upstream conflicts with your branch${RESOLVER_PROBLEM:+ and $RESOLVER_PROBLEM}"
+  log "rebase onto $UP_REF conflicts in ${files:-files git no longer lists}; building $FORK_BRANCH on the upstream it already contains ($BEHIND_SHORT, $BEHIND_DATE)"
+  # status.sh reads this line when there is no run record.
+  log "behind upstream: $BEHIND_NOTE"
+}
+
+# Runs the test gate against $GATE_REF and fails the run with the gate's reason when it doesn't pass.
+gate_or_fail() {
+  run_gate && { log "tests green"; return 0; }
+  if [ "$REBASED" = 1 ]; then
+    log "tests failed after rebase; restoring $FORK_BRANCH to $ORIG"
+    restore_branch
+    vp i >/dev/null 2>&1
+  fi
+  local reason
+  reason="$(cat "$STATE/gate-reason" 2>/dev/null || echo "the tests failed")"
+  [ -n "$BEHIND_NOTE" ] \
+    && reason="$reason (tested on the older upstream $FORK_BRANCH already contains, $BEHIND_SHORT from $BEHIND_DATE, because the newest upstream conflicts with it)"
+  fail "$reason"
 }
 
 update_cleanup() {
@@ -470,9 +515,9 @@ run_gate() {
     fork_failures_are_flaky "$group" "$files" "$group_out" || return 1
   done
   [ "$RUN_CHECK_CHANGED" = 1 ] || return 0
-  log "vp run check:changed $UP_REF"
+  log "vp run check:changed $GATE_REF"
   local out="$STATE/check-changed.out"
-  vp run check:changed "$UP_REF" 2>&1 | tee "$out"
+  vp run check:changed "$GATE_REF" 2>&1 | tee "$out"
   [ "${PIPESTATUS[0]}" = 0 ] && return 0
   # Only test steps may fail, and only with failures plain upstream has too.
   local bad
@@ -807,6 +852,10 @@ run_resolver() {
   problem="$(resolver_problem "$RESOLVER_PROVIDER")"
   if [ -n "$problem" ]; then
     log "not starting the conflict resolver: $problem"
+    if [ "$FALLBACK_ON_CONFLICT" = 1 ]; then
+      RESOLVER_PROBLEM="$problem"
+      return 1
+    fi
     RUN_RESULT=conflict_unresolved
     restore_branch
     fail "the rebase conflicts and $problem"

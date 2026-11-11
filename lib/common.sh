@@ -21,6 +21,9 @@ RESOLVER_PROVIDER="claude"
 RESOLVER_MODEL="opus"
 RESOLVER_EFFORT=""
 RESOLVER_TIMEOUT_MIN=90
+# When the rebase onto the newest upstream ends in conflicts the resolver can't settle: 1 builds the
+# branch as it is, on the upstream it already contains; 0 fails the run (the app stays as it is).
+FALLBACK_ON_CONFLICT=1
 TOOL_PATH=""
 # side-by-side: your build is its own app next to the official one (SIDE_* below).
 # replace: your build takes over the official app's name, bundle id and data (switch/rollback).
@@ -304,6 +307,9 @@ write_config() {
     echo "# time limit. Effort: claude takes low, medium, high, xhigh, max; codex also none and minimal."
     echo "# 't3code-diy config set RESOLVER_PROVIDER codex RESOLVER_MODEL gpt-5.5' changes them."
     for v in RESOLVER_PROVIDER RESOLVER_MODEL RESOLVER_EFFORT RESOLVER_TIMEOUT_MIN; do echo "$v=$(sq "${!v}")"; done
+    echo "# 1 = when the resolver can't settle the rebase, build the branch on the upstream it already"
+    echo "# contains (behind upstream); 0 = fail the run and leave the installed app as it is"
+    echo "FALLBACK_ON_CONFLICT=$(sq "$FALLBACK_ON_CONFLICT")"
     echo "# Your fork's tests: each entry is a regex over 'git ls-files', run as one 'vp test run'."
     printf 'FORK_TEST_GROUPS=('
     for g in "${FORK_TEST_GROUPS[@]+"${FORK_TEST_GROUPS[@]}"}"; do printf '\n  %s' "$(sq "$g")"; done
