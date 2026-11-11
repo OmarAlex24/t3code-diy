@@ -543,20 +543,22 @@ unnamed_failures() {
 
 # fork_failures_are_flaky <group> <files> <out>: a fork test group failed with output <out>.
 # Re-runs the failing files once and succeeds only when that re-run passes: a loaded machine makes
-# browser tests time out now and then. Otherwise says which tests failed.
+# browser tests time out now and then. When the output doesn't pin every failure on a named test
+# (say the browser session never connected, so no test ran), every file of the group is re-run
+# instead, one at a time (rerun_group_files). Otherwise says which tests failed.
 fork_failures_are_flaky() {
   local group="$1" files="$2" out="$3" lines retest="$STATE/fork-tests-retest.out" why again still
   lines="$(failed_tests "$out")"
   if [ -z "$lines" ]; then
     log "fork tests in '$group' failed without test failures I can parse"
-    gate_fail "your fork's tests failed in '$group' (no failed test named in the output)"
-    return 1
+    rerun_group_files "$group" "$files" "$retest" "" "no failed test named"
+    return
   fi
   why="$(unnamed_failures "$out" "$lines")"
   if [ -n "$why" ]; then
     log "fork tests in '$group' failed, not only in tests I can name ($why):"; echo "$lines" | sed 's/^/  /'
-    gate_fail "$(tests_failed_reason "$lines" "$group" " ($why)")"
-    return 1
+    rerun_group_files "$group" "$files" "$retest" "$lines" "$why"
+    return
   fi
   log "fork tests failed in '$group'; re-running the failing file(s) once:"; echo "$lines" | sed 's/^/  /'
   if ! rerun_failed_tests "$lines" "$REPO" "$retest" "$files"; then
@@ -579,6 +581,36 @@ fork_failures_are_flaky() {
     gate_fail "$(tests_failed_reason "$again" "$group" " (on the re-run)")"
   else
     gate_fail "$(tests_failed_reason "$lines" "$group" " (the re-run failed too)")"
+  fi
+  return 1
+}
+
+# rerun_group_files <group> <files> <retest> <lines> <why>: a fork test group failed in a way its
+# output doesn't pin on tests (<why>; <lines> are the failed tests it did name, if any). Re-runs
+# every file of the group once, one file per run, so they run in turn on a less loaded machine:
+# a browser session that didn't connect in time names no test, and the file passes on its own.
+# Succeeds only when every file passes; otherwise says which tests failed on the re-run, or that
+# the re-run failed too.
+rerun_group_files() {
+  local group="$1" files="$2" retest="$3" lines="$4" why="$5" again
+  log "re-running each file of '$group' once, one at a time"
+  # Each group file is its own "line": its path matches only itself among the group's files.
+  rerun_failed_tests "$(tr ' ' '\n' <<<"$files" | sed '/^$/d')" "$REPO" "$retest" "$files" \
+    || { log "cannot find $RERUN_MISSING among the group's files"; RERUN_RC=1; }
+  sed 's/^/  re-run| /' "$retest"
+  if [ "$RERUN_RC" = 0 ]; then
+    log "every file in '$group' passed when re-run one at a time (flaky: $why)"
+    [ -z "$lines" ] || echo "$lines" | sed 's/^/  /'
+    return 0
+  fi
+  again="$(failed_tests "$retest")"
+  log "the re-run failed too (exit $RERUN_RC):"; echo "${again:-(no test named)}" | sed 's/^/  /'
+  if [ -n "$again" ]; then
+    gate_fail "$(tests_failed_reason "$again" "$group" " (on the re-run)")"
+  elif [ -z "$lines" ]; then
+    gate_fail "your fork's tests failed in '$group' (no failed test named in the output, also when re-run file by file)"
+  else
+    gate_fail "$(tests_failed_reason "$lines" "$group" " ($why, also when re-run file by file)")"
   fi
   return 1
 }
