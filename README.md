@@ -79,7 +79,9 @@ Every day (and when you log in) a launchd job on your Mac:
 
 1. fetches upstream `main` and the branch you follow, and rebases that branch onto upstream
    (with `git rerere` on, so a conflict you resolved once stays resolved)
-2. if the rebase conflicts, runs Claude Code or Codex headless to resolve it
+2. if the rebase conflicts, runs Claude Code or Codex headless to resolve it. If that doesn't settle
+   it, the run builds your branch as it is, on the upstream it already contains, and says the
+   build is behind upstream (see [Conflict resolver](#conflict-resolver))
 3. runs the branch's own tests (your `--test-group`s) plus upstream's `vp run check:changed`
 4. pushes the rebased branch back to your fork (skipped with `--no-push`)
 5. builds the macOS app, signs it with a self-signed certificate that lives only on your Mac,
@@ -89,7 +91,9 @@ Your app's own "update available" button then installs the new build, like the o
 with its releases.
 
 If nothing changed since the last build it does nothing. If the rebase or the tests fail, nothing
-gets pushed or published and your branch is put back where it was. The push happens right after
+gets pushed or published and your branch is put back where it was. Rebase conflicts the agent
+can't resolve are the exception: by default the job then tests and builds your branch unchanged on
+the older upstream it already sits on (`FALLBACK_ON_CONFLICT`). The push happens right after
 the tests pass, so if the build or signing fails after that, the rebased branch is already on your
 fork but nothing is published. Either way the app you have installed stays as it is, and you get a
 macOS notification with the path to the log.
@@ -151,6 +155,23 @@ Ultrathink aren't on the list: they spin up extra agents or live in the prompt, 
 you want from a one-shot rebase. Switch providers and an effort the new CLI doesn't have just goes
 back to empty, so `RESOLVER_PROVIDER claude` after Codex's `minimal` leaves you on Claude's default.
 
+When the agent can't settle the conflicts (or can't start, say because its CLI is logged out), the
+branch goes back to where it was and, by default, the run carries on with it as it is: your branch
+already sits on an older upstream commit (its merge base with `upstream/main`), so the job tests it
+against that commit (`check:changed` and the pristine-upstream comparison use it too), pushes
+nothing, and builds and publishes it. The log says
+`rebase onto upstream/main conflicts in <files>; building <branch> on the upstream it already
+contains (<sha>, <date>)`, and the run's reason and the "build ready" notification say the build is
+on upstream from that date and that the newest upstream conflicts with your branch. Upstream moves
+fast, so this keeps you on a working build of your branch while you resolve the rebase by hand and
+push it; the next run then rebases as usual. If the tests fail on the older upstream, the run fails
+as it would otherwise, and the reason says which upstream it tested on. To fail the run instead
+whenever the rebase can't be settled (the installed app stays as it is), turn it off:
+
+```sh
+~/.t3code-diy/kit/bin/t3code-diy config set FALLBACK_ON_CONFLICT 0
+```
+
 `set` checks every value before it writes anything, and won't switch to a CLI that isn't installed
 and logged in. Model names are what T3 Code shows (`opus`, `claude-opus-4-6[1m]`, `gpt-5.5`); the
 agent gets `RESOLVER_TIMEOUT_MIN` minutes (default 90). Configs from before this used
@@ -158,9 +179,11 @@ agent gets `RESOLVER_TIMEOUT_MIN` minutes (default 90). Configs from before this
 `install --resolver codex --model gpt-5.5 --effort high` does the same at install time. Older
 configs have no `RESOLVER_EFFORT` line and keep working; the next write adds it.
 
-`config set` also takes `RESOLVER_TIMEOUT_MIN`, `PUSH` and `RUN_CHECK_CHANGED`. `config get KEY`
-reads any plain setting. Schedule, port, labels and the `SIDE_*` values still go through `install`,
-because launchd or a rebuild has to pick them up.
+`config set` also takes `RESOLVER_TIMEOUT_MIN`, `PUSH`, `RUN_CHECK_CHANGED` and
+`FALLBACK_ON_CONFLICT` (1, the default, builds on the upstream the branch already contains when the
+rebase conflicts beyond the agent; 0 fails the run). Configs without a `FALLBACK_ON_CONFLICT` line
+get 1. `config get KEY` reads any plain setting. Schedule, port, labels and the `SIDE_*` values
+still go through `install`, because launchd or a rebuild has to pick them up.
 
 ## In the app
 
@@ -217,8 +240,10 @@ changes meaning or goes away; new fields can show up any time, so ignore the one
   `up_to_date` (nothing changed), `running`, `conflict_unresolved`, `tests_failed`,
   `migration_collision`, `rebase_failed`, `push_failed`, `build_failed`, `interrupted` (the run
   died without finishing: killed, or the Mac shut down) and `error` (anything else). `reason` is one
-  plain sentence. On every result but `ok` the installed app is exactly as it was. `endedAt`
-  is `null` while it runs.
+  plain sentence. A build made on the upstream the branch already contains, because the newest one
+  conflicts, is still `ok`; its reason reads like `built <version> on upstream from <date>; the newest
+  upstream conflicts with your branch` (`up_to_date` runs in that state add the same note). On
+  every result but `ok` the installed app is exactly as it was. `endedAt` is `null` while it runs.
 
 Exit codes: `run`, `config` and `log` exit 0 on success, 1 when something is wrong (the message is
 on stderr) and 2 for a bad command line.
