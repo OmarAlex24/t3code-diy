@@ -317,17 +317,18 @@ Configs from before modes existed stay in replace mode.
   runtime and the build's entitlements minus the ones that need an Apple provisioning profile.
   Renaming and the `Info.plist` changes happen before signing, and the feed zip is made from the
   signed app.
-- The test gate runs your `FORK_TEST_GROUPS` (must pass) and `vp run check:changed upstream/main`.
-  When a fork test group fails, the files of its failing tests run once more on their own, and if
-  that re-run passes the failures count as flaky (a loaded machine makes browser tests time out now
-  and then); the log names them. When the output doesn't pin the failure on a test (a file that
-  won't load, an error outside the tests such as a browser session that never connected), every
-  file of the group runs once more, one at a time, and if they all pass the failure counts as flaky
-  too; the log says why. A re-run that fails blocks the build, and the failure says how many tests
-  failed and names the first, or says that no test was named even file by file. A check:changed
-  test failure is re-run alone the same way, and one that fails again only counts as OK if the same
-  test also fails on a pristine upstream checkout (`~/.t3code-diy/upstream-check`). Anything else
-  blocks the build.
+- The test gate runs your `FORK_TEST_GROUPS` (must pass) and `vp run check:changed upstream/main`,
+  with 45 minutes per step instead of check:changed's 15: its test step runs every test your
+  branch's diff touches, and a growing fork outgrows 15 minutes. When a fork test group fails, the
+  files of its failing tests run once more on their own, and if that re-run passes the failures
+  count as flaky (a loaded machine makes browser tests time out now and then); the log names them.
+  When the output doesn't pin the failure on a test (a file that won't load, an error outside the
+  tests such as a browser session that never connected), every file of the group runs once more, one
+  at a time, and if they all pass the failure counts as flaky too; the log says why. A re-run that
+  fails blocks the build, and the failure says how many tests failed and names the first, or says
+  that no test was named even file by file. A check:changed test failure is re-run alone the same
+  way, and one that fails again only counts as OK if the same test also fails on a pristine upstream
+  checkout (`~/.t3code-diy/upstream-check`). Anything else blocks the build.
 - Browser tests (`*.browser.test.tsx`) need Playwright's headless Chromium. The gate downloads the
   version the repo pins into `~/.t3code-diy/playwright-browsers` (once, about 100 MB), the same
   step upstream's CI runs.
