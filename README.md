@@ -193,7 +193,9 @@ in Settings, About: the last update and its result, the log, an Update now butto
 conflict resolver picker (provider, model and effort, written with `config set`). It talks to the kit only through the commands below, so the kit and the
 app can be updated separately. Without the key (anybody else's fork, or the official app) nothing
 changes. Side-by-side builds also get `T3CODE_DESKTOP_DISPLAY_NAME="$SIDE_APP_NAME"`, which a fork
-that reads it uses for the window title and the About panel.
+that reads it uses for the window title and the About panel. `update` and `install-app` write
+`$SIDE_APP_NAME` to `$SIDE_T3_HOME/environment-label`, which T3 Code's server reads as its
+environment name, so other clients list the side-by-side app under that name, not the computer's.
 
 ## Machine-readable status
 
