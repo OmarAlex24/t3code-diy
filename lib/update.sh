@@ -160,6 +160,7 @@ cmd_update() {
       || fail "the built app does not read T3CODE_DESKTOP_USER_DATA_NAME (stale --reuse-dist output?); not publishing it"
     built_app="$(make_side_by_side "$built_app")" || fail "turning the build into $SIDE_APP_NAME failed"
     log "side-by-side app: $SIDE_APP_NAME ($SIDE_BUNDLE_ID), home $SIDE_T3_HOME, userData $SIDE_USER_DATA_NAME, port $SIDE_PORT"
+    write_side_environment_label || fail "could not write $SIDE_T3_HOME/environment-label"
   fi
 
   # The managed policy's feedUrl only accepts https, so the local feed is baked into the bundle.

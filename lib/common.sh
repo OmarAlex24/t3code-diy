@@ -115,6 +115,12 @@ resolver_problem() {
 
 is_side_by_side() { [ "$MODE" = "side-by-side" ]; }
 
+# The side-by-side app's server reads its environment name from this file. Without it the app is
+# listed under the computer's name, the same as the official app.
+write_side_environment_label() {
+  mkdir -p "$SIDE_T3_HOME" && printf '%s\n' "$SIDE_APP_NAME" >"$SIDE_T3_HOME/environment-label"
+}
+
 derive_paths() {
   REPO="$DIY_HOME/repo"
   UPSTREAM_WT="$DIY_HOME/upstream-check"

@@ -58,6 +58,7 @@ cmd_install_app() {
   rm -rf "$INSTALLED_APP" || die "could not remove the old $INSTALLED_APP"
   mv "$tmp" "$INSTALLED_APP" || die "could not move the new app to $INSTALLED_APP"
   register_app "$INSTALLED_APP"
+  write_side_environment_label || echo "warning: could not write $SIDE_T3_HOME/environment-label; the app is listed under the computer's name."
 
   cat <<EOF
 
